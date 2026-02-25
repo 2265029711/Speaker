@@ -1,0 +1,41 @@
+# 声纹识别系统配置文件
+
+# 音频配置
+audio:
+  sample_rate: 16000        # 采样率
+  min_duration: 3.0         # 最小音频时长（秒）
+  n_mels: 80                # Mel滤波器组数量
+  frame_length: 25          # 帧长（ms）
+  frame_shift: 10           # 帧移（ms）
+  n_fft: 512                # FFT点数
+  preemphasis: 0.97         # 预加重系数
+
+# 模型配置
+model:
+  pretrained_model: "LanceaKing/spkrec-ecapa-cnceleb"
+  embedding_dim: 192        # 声纹嵌入维度
+
+# 训练配置
+training:
+  batch_size: 8             # RTX 3060 显存优化
+  learning_rate: 0.001
+  weight_decay: 2e-5
+  epochs: 15                # 微调15轮通常足够收敛
+  num_workers: 2            # 减少内存占用
+  device: "cuda"            # cuda 或 cpu
+
+# 数据路径
+data:
+  train_dir: "data/train"
+  valid_dir: "data/valid"
+  train_csv: "data/train.csv"
+  valid_csv: "data/valid.csv"
+
+# 认证配置
+verification:
+  threshold: 0.5            # 余弦相似度阈值
+
+# 输出配置
+output:
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
