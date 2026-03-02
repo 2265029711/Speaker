@@ -40,7 +40,6 @@ env/
 data/
 
 # Model and checkpoints
-pretrained_models/
 checkpoints/
 *.pt
 *.pth
