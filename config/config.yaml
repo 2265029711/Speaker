@@ -12,7 +12,7 @@ audio:
 
 # 模型配置
 model:
-  pretrained_model: "LanceaKing/spkrec-ecapa-cnceleb"
+  pretrained_model: "pretrained_models"  # 使用本地预训练模型
   embedding_dim: 192        # 声纹嵌入维度
 
 # 训练配置
