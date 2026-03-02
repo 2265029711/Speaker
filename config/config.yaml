@@ -19,10 +19,29 @@ model:
 training:
   batch_size: 8             # RTX 3060 显存优化
   learning_rate: 0.001
-  weight_decay: 2e-5
-  epochs: 15                # 微调15轮通常足够收敛
+  weight_decay: 1e-4        # L2正则化，增大防止过拟合
+  epochs: 30                # 增加最大轮数，配合早停
   num_workers: 2            # 减少内存占用
   device: "cuda"            # cuda 或 cpu
+  
+  # 早停配置
+  early_stopping:
+    enabled: true           # 是否启用早停
+    patience: 5             # 容忍轮数（连续N轮无改善则停止）
+    min_delta: 0.001        # 最小改善幅度
+    monitor: "val_eer"      # 监控指标
+  
+  # 损失函数配置
+  loss_type: "aam_softmax"  # 可选: softmax, aam_softmax, subcenter_aam, combined
+  aam_s: 30.0               # AAM-Softmax 缩放因子
+  aam_m: 0.2                # AAM-Softmax 角度边界 (弧度)
+  
+  # Backbone 微调配置
+  finetune_backbone: true   # 是否微调 ECAPA-TDNN backbone
+  backbone_lr_scale: 0.1    # backbone 学习率 = learning_rate * backbone_lr_scale
+  
+  # Dropout配置
+  dropout: 0.1              # Dropout概率，防止过拟合
 
 # 数据路径
 data:
