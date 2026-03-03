@@ -109,7 +109,7 @@ class Preprocessor:
     """音频预处理器：预加重、分帧加窗"""
     
     def __init__(self, preemphasis: float = 0.97):
-        self.preemphasis = preemphasis
+        self._preemphasis = preemphasis
     
     def preemphasis(self, waveform: torch.Tensor) -> torch.Tensor:
         """
@@ -123,7 +123,7 @@ class Preprocessor:
         """
         waveform = waveform.squeeze(0)
         emphasized = torch.zeros_like(waveform)
-        emphasized[1:] = waveform[1:] - self.preemphasis * waveform[:-1]
+        emphasized[1:] = waveform[1:] - self._preemphasis * waveform[:-1]
         emphasized[0] = waveform[0]
         return emphasized.unsqueeze(0)
 

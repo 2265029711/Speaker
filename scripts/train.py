@@ -8,6 +8,10 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -642,11 +646,13 @@ def train(config_path: str = "config/config.yaml"):
                 torch.save({
                     'epoch': epoch + 1,
                     'classifier_state_dict': classifier.state_dict(),
+                    'embedding_model': verification.mods["embedding_model"].state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'train_metrics': train_metrics,
                     'val_metrics': val_metrics,
                     'speaker_to_idx': train_dataset.speaker_to_idx,
-                    'best_val_eer': best_val_eer
+                    'best_val_eer': best_val_eer,
+                    'finetune_backbone': finetune_backbone
                 }, best_checkpoint_path)
                 print(f"最佳模型已保存: {best_checkpoint_path} (EER: {best_val_eer:.4f})")
         
@@ -670,10 +676,12 @@ def train(config_path: str = "config/config.yaml"):
             torch.save({
                 'epoch': epoch + 1,
                 'classifier_state_dict': classifier.state_dict(),
+                'embedding_model': verification.mods["embedding_model"].state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_metrics': train_metrics,
                 'val_metrics': val_metrics,
-                'speaker_to_idx': train_dataset.speaker_to_idx
+                'speaker_to_idx': train_dataset.speaker_to_idx,
+                'finetune_backbone': finetune_backbone
             }, checkpoint_path)
             print(f"检查点已保存: {checkpoint_path}")
         
@@ -687,11 +695,13 @@ def train(config_path: str = "config/config.yaml"):
     final_path = os.path.join(output_cfg['checkpoint_dir'], "classifier_final.pt")
     torch.save({
         'classifier_state_dict': classifier.state_dict(),
+        'embedding_model': verification.mods["embedding_model"].state_dict(),
         'speaker_to_idx': train_dataset.speaker_to_idx,
         'num_speakers': num_speakers,
         'best_epoch': best_epoch,
         'best_val_f1': best_val_f1,
-        'best_val_eer': best_val_eer
+        'best_val_eer': best_val_eer,
+        'finetune_backbone': finetune_backbone
     }, final_path)
     print(f"\n最终模型已保存: {final_path}")
     print(f"最佳模型: Epoch {best_epoch}, EER: {best_val_eer:.4f}")

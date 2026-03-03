@@ -12,7 +12,7 @@ pip install torch==2.10.0+cu130 torchaudio==2.10.0 torchvision==0.25.0+cu130 --i
 pip install speechbrain==1.0.3
 
 # 安装其他依赖
-pip install numpy==2.3.5 tqdm==4.67.3 pyyaml scipy soundfile matplotlib seaborn scikit-learn pandas
+pip install numpy tqdm pyyaml scipy soundfile matplotlib seaborn scikit-learn pandas
 ```
 
 ---
@@ -48,22 +48,37 @@ speaker_002,speaker_002/audio_01.wav
 ## 3. 模型训练（微调）
 
 ```bash
-cd D:\github\Speaker
 python scripts/train.py
 ```
 
-训练完成后，模型保存在 `checkpoints/` 目录。
+训练完成后，模型保存在 `checkpoints/` 目录：
+- `classifier_best.pt` - 最佳模型（验证集 EER 最低）
+- `classifier_final.pt` - 最终模型
+- `classifier_epoch_N.pt` - 每 5 轮保存的检查点
 
 ---
 
 ## 4. 声纹注册
 
-```bash
-# 注册用户
-python scripts/enroll.py --user_id user_001 --audio data/train/speaker_001/audio_01.wav
+### 使用预训练模型
 
-# 注册多个用户
-python scripts/enroll.py --user_id user_002 --audio path/to/voice.wav
+```bash
+python scripts/enroll.py --user_id user_001 --audio path/to/voice.wav
+```
+
+### 使用训练后的模型
+
+```bash
+python scripts/enroll.py --user_id user_001 --audio path/to/voice.wav --checkpoint checkpoints/classifier_final.pt
+```
+
+**输出示例：**
+```
+加载训练模型: checkpoints/classifier_final.pt
+模型权重已从 checkpoints/classifier_final.pt 加载
+注册成功!
+用户ID: user_001
+嵌入维度: 192
 ```
 
 注册后，声纹向量存储在 `voiceprint_db.json`。
@@ -72,51 +87,96 @@ python scripts/enroll.py --user_id user_002 --audio path/to/voice.wav
 
 ## 5. 身份认证
 
-**1:1认证模式**（验证是否是某个用户）：
+### 1:1 认证模式（验证是否是某个用户）
+
 ```bash
-python scripts/verify.py --user_id user_001 --audio path/to/test_voice.wav
+# 使用预训练模型
+python scripts/verify.py --user_id user_001 --audio path/to/test.wav
+
+# 使用训练后的模型
+python scripts/verify.py --user_id user_001 --audio path/to/test.wav --checkpoint checkpoints/classifier_final.pt
 ```
 
-**1:N辨认模式**（找出是谁）：
-```bash
-python scripts/verify.py --audio path/to/test_voice.wav --identify
+**输出示例：**
 ```
-
----
-
-## 6. 输出示例
-
-**认证结果：**
-```
+加载训练模型: checkpoints/classifier_final.pt
+模型权重已从 checkpoints/classifier_final.pt 加载
+已加载 2 个注册用户
 用户ID: user_001
-相似度: 0.7823
+相似度: 0.7714
 阈值: 0.5
 判决: accept
 置信度: high
 ```
 
----
-
-## 快速测试流程
+### 1:N 辨认模式（找出是谁）
 
 ```bash
-# 1. 准备一条测试音频到 data/train/ 目录
+# 使用预训练模型
+python scripts/verify.py --audio path/to/test.wav --identify
 
-# 2. 编辑 data/train.csv 添加标签
+# 使用训练后的模型
+python scripts/verify.py --audio path/to/test.wav --identify --checkpoint checkpoints/classifier_final.pt
+```
 
-# 3. 训练（可选，直接用预训练模型也行）
-python scripts/train.py
-
-# 4. 注册声纹
-python scripts/enroll.py --user_id test_user --audio your_audio.wav
-
-# 5. 验证
-python scripts/verify.py --user_id test_user --audio another_audio.wav
+**输出示例：**
+```
+加载训练模型: checkpoints/classifier_final.pt
+模型权重已从 checkpoints/classifier_final.pt 加载
+已加载 2 个注册用户
+识别结果: user_001
+相似度: 0.7881
+判决: accept
 ```
 
 ---
 
-## 参数说明
+## 6. 完整示例流程
+
+```bash
+# Step 1: 注册用户 user_001（使用说话人 D11 的音频）
+python scripts/enroll.py --user_id user_001 --audio data/valid/D11_750.wav --checkpoint checkpoints/classifier_final.pt
+
+# Step 2: 注册用户 user_002（使用另一个说话人的音频）
+python scripts/enroll.py --user_id user_002 --audio data/train/A11_0.wav --checkpoint checkpoints/classifier_final.pt
+
+# Step 3: 身份认证（用同一说话人的另一段音频验证 user_001）
+python scripts/verify.py --user_id user_001 --audio data/valid/D11_751.wav --checkpoint checkpoints/classifier_final.pt
+# 输出: 相似度 0.77, 判决 accept
+
+# Step 4: 说话人辨认（不指定用户，系统自动识别）
+python scripts/verify.py --audio data/valid/D11_752.wav --identify --checkpoint checkpoints/classifier_final.pt
+# 输出: 识别结果 user_001, 相似度 0.79
+
+# Step 5: 冒充攻击测试（用 user_002 的音频冒充 user_001）
+python scripts/verify.py --user_id user_001 --audio data/train/A11_1.wav --checkpoint checkpoints/classifier_final.pt
+# 输出: 相似度 0.54, 判决 accept（边界情况，可调高阈值）
+```
+
+---
+
+## 7. 参数说明
+
+### 命令行参数
+
+#### enroll.py
+
+| 参数 | 说明 | 必需 |
+|------|------|------|
+| `--user_id` | 用户ID | 是 |
+| `--audio` | 音频文件路径 | 是 |
+| `--checkpoint` | 训练模型路径 | 否 |
+| `--config` | 配置文件路径 | 否 |
+
+#### verify.py
+
+| 参数 | 说明 | 必需 |
+|------|------|------|
+| `--user_id` | 声称的用户ID（认证模式） | 认证模式必需 |
+| `--audio` | 待测音频路径 | 是 |
+| `--checkpoint` | 训练模型路径 | 否 |
+| `--identify` | 使用辨认模式（1:N） | 否 |
+| `--config` | 配置文件路径 | 否 |
 
 ### config/config.yaml
 
@@ -124,9 +184,19 @@ python scripts/verify.py --user_id test_user --audio another_audio.wav
 |------|------|--------|
 | audio.sample_rate | 采样率 | 16000 |
 | audio.min_duration | 最小时长(秒) | 3.0 |
-| audio.n_mels | Mel滤波器数量 | 80 |
-| model.pretrained_model | 预训练模型ID | LanceaKing/spkrec-ecapa-cnceleb |
-| training.batch_size | 批大小 | 32 |
+| model.pretrained_model | 预训练模型路径 | pretrained_models |
+| training.batch_size | 批大小 | 8 |
 | training.learning_rate | 学习率 | 0.001 |
-| training.epochs | 训练轮数 | 50 |
+| training.epochs | 训练轮数 | 30 |
 | verification.threshold | 认证阈值 | 0.5 |
+
+---
+
+## 8. 置信度说明
+
+| 置信度 | 相似度范围 | 说明 |
+|--------|------------|------|
+| very_high | >= 0.8 | 非常确信是同一人 |
+| high | 0.6 ~ 0.8 | 较为确信是同一人 |
+| medium | 阈值 ~ 0.6 | 刚好通过验证 |
+| low | < 阈值 | 未通过验证 |
