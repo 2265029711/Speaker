@@ -5,8 +5,8 @@
 # Feature parameters
 n_mels: 80
 
-# Pretrain folder (local)
-pretrained_path: .
+# Pretrain folder (local) - use absolute path
+pretrained_path: D:/github/Speaker/pretrained_models
 
 # Output parameters
 out_n_neurons: 2793
