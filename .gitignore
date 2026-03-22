@@ -46,7 +46,6 @@ checkpoints/
 *.bin
 
 # Logs and outputs
-logs/
 *.log
 
 # Voiceprint database
