@@ -37,60 +37,140 @@ from utils.losses import get_loss_function, AAMSoftmax
 
 
 class EarlyStopping:
-    """早停机制：监控验证指标，连续N轮无改善则停止训练"""
+    """早停机制：支持混合指标监控，准确率优先策略"""
     
-    def __init__(self, patience=5, min_delta=0.001, monitor='val_eer', mode='min'):
+    def __init__(self, patience=5, min_delta=0.001, monitor='val_eer', mode='min',
+                 use_hybrid=False, accuracy_weight=0.7, eer_weight=0.3,
+                 accuracy_threshold=0.90):
         """
         Args:
             patience: 容忍轮数
             min_delta: 最小改善幅度
-            monitor: 监控指标名称
+            monitor: 监控指标名称（单指标模式）
             mode: 'min' 指标越小越好，'max' 指标越大越好
+            use_hybrid: 是否使用混合指标模式
+            accuracy_weight: 准确率权重（混合模式）
+            eer_weight: EER权重（混合模式）
+            accuracy_threshold: 准确率阈值，低于此值时优先提升准确率
         """
         self.patience = patience
         self.min_delta = min_delta
         self.monitor = monitor
         self.mode = mode
+        self.use_hybrid = use_hybrid
+        self.accuracy_weight = accuracy_weight
+        self.eer_weight = eer_weight
+        self.accuracy_threshold = accuracy_threshold
+        
         self.counter = 0
-        self.best_value = None
+        self.best_score = None
+        self.best_accuracy = 0.0
+        self.best_eer = float('inf')
         self.early_stop = False
         self.best_epoch = 0
         
-    def __call__(self, current_value, current_epoch):
+    def _compute_hybrid_score(self, accuracy, eer):
+        """计算混合得分：准确率优先策略"""
+        # 准确率越高越好，EER越低越好
+        # 综合得分 = accuracy_weight * accuracy - eer_weight * eer
+        return self.accuracy_weight * accuracy - self.eer_weight * eer
+    
+    def __call__(self, metrics, current_epoch):
         """
         检查是否应该早停
         
         Args:
-            current_value: 当前监控指标值
+            metrics: 字典，包含 'accuracy' 和 'eer'
+                     - accuracy: 训练或验证准确率
+                     - eer: 验证EER
             current_epoch: 当前轮数
             
         Returns:
             bool: True 表示应该停止训练
         """
-        if self.best_value is None:
-            self.best_value = current_value
-            self.best_epoch = current_epoch
-            return False
+        accuracy = metrics.get('accuracy', 0.0)
+        eer = metrics.get('eer', 1.0)
         
-        if self.mode == 'min':
-            improved = current_value < self.best_value - self.min_delta
-        else:
-            improved = current_value > self.best_value + self.min_delta
-        
-        if improved:
-            self.best_value = current_value
-            self.best_epoch = current_epoch
-            self.counter = 0
-        else:
+        if self.use_hybrid:
+            # 混合指标模式：准确率优先
+            current_score = self._compute_hybrid_score(accuracy, eer)
+            
+            if self.best_score is None:
+                self.best_score = current_score
+                self.best_accuracy = accuracy
+                self.best_eer = eer
+                self.best_epoch = current_epoch
+                return False
+            
+            # 准确率优先策略：
+            # 1. 如果准确率低于阈值，优先提升准确率
+            # 2. 如果准确率高于阈值，综合考虑准确率和EER
+            
+            accuracy_improved = accuracy > self.best_accuracy + self.min_delta
+            eer_improved = eer < self.best_eer - self.min_delta
+            
+            # 准确率低于阈值时，只要准确率有提升就不计数
+            if accuracy < self.accuracy_threshold:
+                if accuracy_improved:
+                    self.counter = 0
+                    self.best_score = current_score
+                    self.best_accuracy = accuracy
+                    self.best_eer = min(self.best_eer, eer)
+                    self.best_epoch = current_epoch
+                    print(f"  混合指标更新: accuracy={accuracy:.4f}↑, eer={eer:.4f}, score={current_score:.4f}")
+                    return False
+            else:
+                # 准确率达到阈值后，使用综合评分
+                if current_score > self.best_score + self.min_delta * 0.1:
+                    self.counter = 0
+                    self.best_score = current_score
+                    self.best_accuracy = accuracy
+                    self.best_eer = eer
+                    self.best_epoch = current_epoch
+                    print(f"  混合指标更新: accuracy={accuracy:.4f}, eer={eer:.4f}, score={current_score:.4f}↑")
+                    return False
+            
+            # 没有改善
             self.counter += 1
-            print(f"  早停计数: {self.counter}/{self.patience} (最佳 {self.monitor}: {self.best_value:.4f} @ Epoch {self.best_epoch})")
+            print(f"  早停计数: {self.counter}/{self.patience} "
+                  f"(最佳 accuracy={self.best_accuracy:.4f}, eer={self.best_eer:.4f}, "
+                  f"score={self.best_score:.4f} @ Epoch {self.best_epoch})")
             
             if self.counter >= self.patience:
                 self.early_stop = True
-                print(f"\n早停触发！最佳模型在 Epoch {self.best_epoch}，{self.monitor} = {self.best_value:.4f}")
+                print(f"\n早停触发！最佳模型在 Epoch {self.best_epoch}，"
+                      f"accuracy={self.best_accuracy:.4f}, eer={self.best_eer:.4f}")
                 return True
-        
-        return False
+            
+            return False
+        else:
+            # 单指标模式（兼容原有逻辑）
+            current_value = metrics.get(self.monitor.replace('val_', ''), 0.0)
+            
+            if self.best_score is None:
+                self.best_score = current_value
+                self.best_epoch = current_epoch
+                return False
+            
+            if self.mode == 'min':
+                improved = current_value < self.best_score - self.min_delta
+            else:
+                improved = current_value > self.best_score + self.min_delta
+            
+            if improved:
+                self.best_score = current_value
+                self.best_epoch = current_epoch
+                self.counter = 0
+            else:
+                self.counter += 1
+                print(f"  早停计数: {self.counter}/{self.patience} (最佳 {self.monitor}: {self.best_score:.4f} @ Epoch {self.best_epoch})")
+                
+                if self.counter >= self.patience:
+                    self.early_stop = True
+                    print(f"\n早停触发！最佳模型在 Epoch {self.best_epoch}，{self.monitor} = {self.best_score:.4f}")
+                    return True
+            
+            return False
 
 
 class SpeakerDataset(Dataset):
@@ -164,6 +244,7 @@ def evaluate_model(verification, classifier, dataloader, device, idx_to_speaker)
         dict: 包含eer, min_dcf等指标
     """
     classifier.eval()
+    verification.eval()  # 确保评估模式
     
     all_embeddings = []
     all_speaker_ids = []
@@ -308,6 +389,8 @@ def evaluate_pretrained_model(verification, dataloader, device):
     Returns:
         dict: 预训练模型在验证集上的指标
     """
+    verification.eval()  # 确保评估模式
+    
     all_embeddings = []
     all_speaker_ids = []
     
@@ -343,6 +426,13 @@ def evaluate_pretrained_model(verification, dataloader, device):
     }
 
 
+def get_state_dict(model):
+    """获取模型的state_dict，兼容DataParallel包装"""
+    if isinstance(model, nn.DataParallel):
+        return model.module.state_dict()
+    return model.state_dict()
+
+
 def train(config_path: str = "config/config.yaml"):
     """训练主函数"""
     
@@ -354,8 +444,28 @@ def train(config_path: str = "config/config.yaml"):
     audio_cfg = config['audio']
     output_cfg = config['output']
     
-    device = torch.device(training_cfg['device'] if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+    # 多卡训练检测与初始化
+    if torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        if num_gpus > 1:
+            print(f"检测到 {num_gpus} 张GPU，启用多卡训练")
+            device = torch.device("cuda")
+            use_multi_gpu = True
+            # 打印GPU信息
+            for i in range(num_gpus):
+                gpu_name = torch.cuda.get_device_name(i)
+                gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
+                print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
+        else:
+            print(f"检测到 1 张GPU: {torch.cuda.get_device_name(0)}")
+            device = torch.device("cuda")
+            use_multi_gpu = False
+    else:
+        print("未检测到GPU，使用CPU训练")
+        device = torch.device("cpu")
+        use_multi_gpu = False
+    
+    print(f"训练设备: {device}, 多卡模式: {use_multi_gpu}")
     
     # 创建输出目录
     os.makedirs(output_cfg['checkpoint_dir'], exist_ok=True)
@@ -384,6 +494,13 @@ def train(config_path: str = "config/config.yaml"):
             run_opts={"device": device}
         )
     
+    # 多卡训练：用DataParallel包装embedding_model
+    embedding_model = verification.mods["embedding_model"]
+    if use_multi_gpu:
+        embedding_model = nn.DataParallel(embedding_model)
+        verification.mods["embedding_model"] = embedding_model
+        print(f"Embedding模型已用DataParallel包装，使用 {num_gpus} 张GPU")
+    
     # 创建训练数据集
     train_dataset = SpeakerDataset(
         csv_path=data_cfg['train_csv'],
@@ -399,22 +516,9 @@ def train(config_path: str = "config/config.yaml"):
         collate_fn=collate_fn
     )
     
-    # 创建验证数据集（如果存在）
+    # 验证数据集已禁用（使用单独的验证脚本评估）
     valid_loader = None
-    if os.path.exists(data_cfg.get('valid_csv', '')):
-        valid_dataset = SpeakerDataset(
-            csv_path=data_cfg['valid_csv'],
-            audio_dir=data_cfg['valid_dir'],
-            sample_rate=audio_cfg['sample_rate']
-        )
-        valid_loader = DataLoader(
-            valid_dataset,
-            batch_size=training_cfg['batch_size'],
-            shuffle=False,
-            num_workers=training_cfg['num_workers'],
-            collate_fn=collate_fn
-        )
-        print(f"验证集大小: {len(valid_dataset)}")
+    print("验证集评估已禁用，请使用 evaluate_model.py 进行验证")
     
     # 获取说话人数量
     num_speakers = len(train_dataset.speaker_ids)
@@ -457,6 +561,10 @@ def train(config_path: str = "config/config.yaml"):
             m=aam_m
         ).to(device)
         criterion = None  # AAM-Softmax 内部包含损失计算
+    
+    # 注意：分类器不使用 DataParallel 包装
+    # 原因：AAMSoftmax 返回标量 loss，DataParallel 会将其收集为 tensor 导致 backward 失败
+    # 分类器计算量小，在单 GPU 上计算即可
     
     # 收集需要优化的参数
     param_groups = []
@@ -506,20 +614,12 @@ def train(config_path: str = "config/config.yaml"):
     print(f"  总参数量: {total_params:,}")
     print(f"  可训练参数量: {trainable_params:,}")
     
-    # 评估预训练模型性能（作为基线）
-    print("\n=== 评估预训练模型基线性能 ===")
-    pretrain_metrics = {}
-    if valid_loader:
-        pretrain_metrics = evaluate_pretrained_model(verification, valid_loader, device)
-        print(f"预训练模型 EER: {pretrain_metrics['eer']:.4f}")
     
     # 训练历史记录
     history = {
         'train_loss': [],
         'train_accuracy': [],
-        'train_f1': [],
-        'val_eer': [],
-        'val_min_dcf': []
+        'train_f1': []
     }
     
     # 初始化早停机制
@@ -530,16 +630,32 @@ def train(config_path: str = "config/config.yaml"):
             patience=int(early_stopping_cfg.get('patience', 5)),
             min_delta=float(early_stopping_cfg.get('min_delta', 0.001)),
             monitor=early_stopping_cfg.get('monitor', 'val_eer'),
-            mode='min'
+            mode='min',
+            use_hybrid=early_stopping_cfg.get('use_hybrid', False),
+            accuracy_weight=float(early_stopping_cfg.get('accuracy_weight', 0.7)),
+            eer_weight=float(early_stopping_cfg.get('eer_weight', 0.3)),
+            accuracy_threshold=float(early_stopping_cfg.get('accuracy_threshold', 0.92))
         )
-        print(f"早停已启用: patience={early_stopping_cfg.get('patience', 5)}, "
-              f"monitor={early_stopping_cfg.get('monitor', 'val_eer')}")
+        if early_stopping_cfg.get('use_hybrid', False):
+            print(f"早停已启用(混合指标模式): patience={early_stopping_cfg.get('patience', 5)}, "
+                  f"accuracy_weight={early_stopping_cfg.get('accuracy_weight', 0.7)}, "
+                  f"eer_weight={early_stopping_cfg.get('eer_weight', 0.3)}, "
+                  f"accuracy_threshold={early_stopping_cfg.get('accuracy_threshold', 0.92)}")
+        else:
+            print(f"早停已启用: patience={early_stopping_cfg.get('patience', 5)}, "
+                  f"monitor={early_stopping_cfg.get('monitor', 'val_eer')}")
     
     # 训练循环
     print("\n=== 开始训练 ===")
     best_val_f1 = 0
     best_epoch = 0
     best_val_eer = float('inf')  # 跟踪最佳 EER
+    best_hybrid_score = -float('inf')  # 混合指标得分（准确率优先）
+    
+    # 获取混合指标权重
+    early_stopping_cfg = training_cfg.get('early_stopping', {})
+    accuracy_weight = float(early_stopping_cfg.get('accuracy_weight', 0.7))
+    eer_weight = float(early_stopping_cfg.get('eer_weight', 0.3))
     
     for epoch in range(training_cfg['epochs']):
         # 设置模型模式
@@ -561,9 +677,16 @@ def train(config_path: str = "config/config.yaml"):
             
             # 提取嵌入向量
             if finetune_backbone:
-                # 微调模式下需要梯度
-                wav_lens = torch.ones(waveforms.size(0), device=device)
-                embeddings = verification.encode_batch(waveforms, wav_lens).squeeze(1)
+                # 微调模式下需要梯度，但 BatchNorm 使用固定统计量（避免多卡单样本问题）
+                # 临时将 embedding_model 设为 eval 模式（BatchNorm 使用固定统计量）
+                # 同时用 enable_grad 确保梯度可以回传
+                was_training = embedding_model.training
+                embedding_model.eval()  # BatchNorm 使用固定统计量
+                with torch.enable_grad():
+                    wav_lens = torch.ones(waveforms.size(0), device=device)
+                    embeddings = verification.encode_batch(waveforms, wav_lens).squeeze(1)
+                if was_training:
+                    embedding_model.train()  # 恢复 train 模式（Dropout 等）
             else:
                 # 冻结模式下不需要梯度
                 with torch.no_grad():
@@ -621,45 +744,30 @@ def train(config_path: str = "config/config.yaml"):
         print(f"  Precision: {train_metrics['precision']:.4f}")
         print(f"  Recall: {train_metrics['recall']:.4f}")
         
-        # 验证集评估
-        val_metrics = {}
-        if valid_loader:
-            val_metrics = evaluate_model(verification, classifier, valid_loader, device, idx_to_speaker)
-            
-            history['val_eer'].append(val_metrics['eer'])
-            history['val_min_dcf'].append(val_metrics['min_dcf'])
-            
-            print(f"\nEpoch {epoch + 1} 验证结果 (说话人验证):")
-            print(f"  EER: {val_metrics['eer']:.4f}")
-            print(f"  EER阈值: {val_metrics['eer_threshold']:.4f}")
-            print(f"  minDCF: {val_metrics['min_dcf']:.4f}")
-            
-            # 保存最佳模型（EER越低越好）
-            if val_metrics['eer'] < best_val_eer:
-                best_val_eer = val_metrics['eer']
-                best_epoch = epoch + 1
-                # 保存最佳模型检查点
-                best_checkpoint_path = os.path.join(
-                    output_cfg['checkpoint_dir'],
-                    "classifier_best.pt"
-                )
-                torch.save({
-                    'epoch': epoch + 1,
-                    'classifier_state_dict': classifier.state_dict(),
-                    'embedding_model': verification.mods["embedding_model"].state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'train_metrics': train_metrics,
-                    'val_metrics': val_metrics,
-                    'speaker_to_idx': train_dataset.speaker_to_idx,
-                    'best_val_eer': best_val_eer,
-                    'finetune_backbone': finetune_backbone
-                }, best_checkpoint_path)
-                print(f"最佳模型已保存: {best_checkpoint_path} (EER: {best_val_eer:.4f})")
+        # 保存最佳模型（基于训练准确率）
+        if train_metrics['accuracy'] > best_hybrid_score:
+            best_hybrid_score = train_metrics['accuracy']
+            best_epoch = epoch + 1
+            # 保存最佳模型检查点
+            best_checkpoint_path = os.path.join(
+                output_cfg['checkpoint_dir'],
+                "classifier_best.pt"
+            )
+            torch.save({
+                'epoch': epoch + 1,
+                'classifier_state_dict': get_state_dict(classifier),
+                'embedding_model': get_state_dict(verification.mods["embedding_model"]),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_metrics': train_metrics,
+                'speaker_to_idx': train_dataset.speaker_to_idx,
+                'best_accuracy': best_hybrid_score,
+                'finetune_backbone': finetune_backbone
+            }, best_checkpoint_path)
+            print(f"最佳模型已保存: {best_checkpoint_path}")
+            print(f"  准确率: {best_hybrid_score:.4f}")
         
         # 每轮保存指标图片
         epoch_metrics = {k: v for k, v in train_metrics.items()}
-        if val_metrics:
-            epoch_metrics.update({f'val_{k}': v for k, v in val_metrics.items()})
         
         plot_epoch_metrics(
             epoch_metrics,
@@ -675,36 +783,38 @@ def train(config_path: str = "config/config.yaml"):
             )
             torch.save({
                 'epoch': epoch + 1,
-                'classifier_state_dict': classifier.state_dict(),
-                'embedding_model': verification.mods["embedding_model"].state_dict(),
+                'classifier_state_dict': get_state_dict(classifier),
+                'embedding_model': get_state_dict(verification.mods["embedding_model"]),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_metrics': train_metrics,
-                'val_metrics': val_metrics,
                 'speaker_to_idx': train_dataset.speaker_to_idx,
                 'finetune_backbone': finetune_backbone
             }, checkpoint_path)
             print(f"检查点已保存: {checkpoint_path}")
         
-        # 早停检查
-        if early_stopping and val_metrics:
-            if early_stopping(val_metrics['eer'], epoch + 1):
+        # 早停检查（基于训练准确率）
+        if early_stopping:
+            hybrid_metrics = {
+                'accuracy': train_metrics['accuracy'],
+                'eer': 0.0  # 无验证EER
+            }
+            if early_stopping(hybrid_metrics, epoch + 1):
                 print(f"\n早停触发于 Epoch {epoch + 1}")
                 break
     
     # 保存最终模型
     final_path = os.path.join(output_cfg['checkpoint_dir'], "classifier_final.pt")
     torch.save({
-        'classifier_state_dict': classifier.state_dict(),
-        'embedding_model': verification.mods["embedding_model"].state_dict(),
+        'classifier_state_dict': get_state_dict(classifier),
+        'embedding_model': get_state_dict(verification.mods["embedding_model"]),
         'speaker_to_idx': train_dataset.speaker_to_idx,
         'num_speakers': num_speakers,
         'best_epoch': best_epoch,
-        'best_val_f1': best_val_f1,
-        'best_val_eer': best_val_eer,
+        'best_accuracy': best_hybrid_score,
         'finetune_backbone': finetune_backbone
     }, final_path)
     print(f"\n最终模型已保存: {final_path}")
-    print(f"最佳模型: Epoch {best_epoch}, EER: {best_val_eer:.4f}")
+    print(f"最佳模型: Epoch {best_epoch}, 准确率: {best_hybrid_score:.4f}")
     
     # 保存训练趋势图
     plot_training_trends(
@@ -712,44 +822,13 @@ def train(config_path: str = "config/config.yaml"):
         save_path=os.path.join(metrics_dir, 'training_trends.png')
     )
     
-    # 保存预训练vs微调对比图
-    if pretrain_metrics and val_metrics:
-        finetuned_metrics = {
-            'eer': val_metrics['eer'],
-            'min_dcf': val_metrics['min_dcf']
-        }
-        plot_pretrain_comparison(
-            pretrain_metrics,
-            finetuned_metrics,
-            save_path=os.path.join(metrics_dir, 'pretrain_vs_finetuned.png')
-        )
-        
-        # 打印性能提升总结
-        print("\n" + "="*50)
-        print("=== 训练完成 - 性能总结 ===")
-        print("="*50)
-        print(f"最佳轮次: Epoch {best_epoch}")
-        
-        if 'eer' in pretrain_metrics:
-            # EER越低越好
-            eer_improvement = (pretrain_metrics['eer'] - finetuned_metrics['eer']) / pretrain_metrics['eer'] * 100
-            print(f"\n预训练模型 EER: {pretrain_metrics['eer']:.4f}")
-            print(f"微调后模型 EER: {finetuned_metrics['eer']:.4f}")
-            if eer_improvement > 0:
-                print(f"EER 改善: {eer_improvement:.2f}% (越低越好)")
-            else:
-                print(f"EER 变化: {eer_improvement:.2f}% (越低越好)")
-            
-            if 'min_dcf' in pretrain_metrics and pretrain_metrics['min_dcf'] > 0:
-                dcf_improvement = (pretrain_metrics['min_dcf'] - finetuned_metrics['min_dcf']) / pretrain_metrics['min_dcf'] * 100
-                print(f"\n预训练模型 minDCF: {pretrain_metrics['min_dcf']:.4f}")
-                print(f"微调后模型 minDCF: {finetuned_metrics['min_dcf']:.4f}")
-                if dcf_improvement > 0:
-                    print(f"minDCF 改善: {dcf_improvement:.2f}% (越低越好)")
-                else:
-                    print(f"minDCF 变化: {dcf_improvement:.2f}% (越低越好)")
-        
-        print(f"\n指标图片已保存至: {metrics_dir}")
+    # 打印性能总结
+    print("\n" + "="*50)
+    print("=== 训练完成 - 性能总结 ===")
+    print("="*50)
+    print(f"最佳轮次: Epoch {best_epoch}")
+    print(f"最佳准确率: {best_hybrid_score:.4f}")
+    print(f"\n指标图片已保存至: {metrics_dir}")
     
     return classifier, train_dataset.speaker_to_idx, history
 

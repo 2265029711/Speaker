@@ -15,6 +15,7 @@ from matplotlib.gridspec import GridSpec
 import yaml
 import pandas as pd
 from tqdm import tqdm
+import csv
 from speechbrain.inference.speaker import SpeakerRecognition
 from torch.utils.data import DataLoader, Dataset
 
@@ -173,6 +174,137 @@ def compute_score_distribution(target_scores, non_target_scores):
         'target_std': np.std(target_scores),
         'non_target_mean': np.mean(non_target_scores),
         'non_target_std': np.std(non_target_scores)
+    }
+
+
+def evaluate_verification_pairs(verification, pairs_csv, audio_dir, device, threshold=0.5):
+    """
+    评估说话人验证准确率（基于预生成的音频对）
+    
+    Args:
+        verification: SpeakerRecognition 模型
+        pairs_csv: 音频对CSV文件路径 (audio1, audio2, label)
+        audio_dir: 音频文件目录
+        device: 设备
+        threshold: 相似度阈值
+    
+    Returns:
+        dict: 包含准确率、精确率、召回率等指标
+    """
+    # 读取音频对
+    df = pd.read_csv(pairs_csv)
+    print(f"\n加载验证对: {len(df)} 对")
+    print(f"  正样本 (label=1): {(df['label']==1).sum()} 对")
+    print(f"  负样本 (label=0): {(df['label']==0).sum()} 对")
+    
+    # 缓存嵌入向量，避免重复计算
+    embedding_cache = {}
+    
+    def get_embedding(audio_path):
+        """获取音频嵌入向量（带缓存）"""
+        if audio_path in embedding_cache:
+            return embedding_cache[audio_path]
+        
+        full_path = os.path.join(audio_dir, audio_path)
+        
+        # 加载音频
+        import torchaudio
+        waveform, sr = torchaudio.load(full_path)
+        
+        # 重采样
+        if sr != 16000:
+            resampler = torchaudio.transforms.Resample(sr, 16000)
+            waveform = resampler(waveform)
+        
+        # 转为单声道
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+        
+        waveform = waveform.to(device)
+        wav_lens = torch.ones(1, device=device)
+        
+        with torch.no_grad():
+            embedding = verification.encode_batch(waveform, wav_lens).squeeze().cpu()
+        
+        embedding_cache[audio_path] = embedding
+        return embedding
+    
+    # 计算相似度
+    scores = []
+    labels = []
+    predictions = []
+    pairs_info = []
+    
+    print("\n计算音频对相似度...")
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="验证对评估"):
+        audio1 = row['audio1']
+        audio2 = row['audio2']
+        true_label = row['label']
+        
+        try:
+            emb1 = get_embedding(audio1)
+            emb2 = get_embedding(audio2)
+            
+            # 计算余弦相似度
+            similarity = torch.nn.functional.cosine_similarity(
+                emb1.unsqueeze(0), emb2.unsqueeze(0)
+            ).item()
+            
+            # 根据阈值预测
+            pred_label = 1 if similarity >= threshold else 0
+            
+            scores.append(similarity)
+            labels.append(true_label)
+            predictions.append(pred_label)
+            pairs_info.append((audio1, audio2, true_label))
+            
+        except Exception as e:
+            print(f"处理 {audio1} - {audio2} 时出错: {e}")
+            continue
+    
+    scores = np.array(scores)
+    labels = np.array(labels)
+    predictions = np.array(predictions)
+    
+    # 计算指标
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+    
+    accuracy = accuracy_score(labels, predictions)
+    precision = precision_score(labels, predictions, zero_division=0)
+    recall = recall_score(labels, predictions, zero_division=0)
+    f1 = f1_score(labels, predictions, zero_division=0)
+    
+    # 计算正负样本的分数分布
+    pos_scores = scores[labels == 1]
+    neg_scores = scores[labels == 0]
+    
+    # 计算 EER
+    eer, eer_threshold, _, _ = compute_eer(pos_scores, neg_scores)
+    
+    # 混淆矩阵
+    tp = np.sum((predictions == 1) & (labels == 1))
+    tn = np.sum((predictions == 0) & (labels == 0))
+    fp = np.sum((predictions == 1) & (labels == 0))
+    fn = np.sum((predictions == 0) & (labels == 1))
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'eer': eer,
+        'eer_threshold': eer_threshold,
+        'threshold': threshold,
+        'pos_score_mean': np.mean(pos_scores) if len(pos_scores) > 0 else 0,
+        'pos_score_std': np.std(pos_scores) if len(pos_scores) > 0 else 0,
+        'neg_score_mean': np.mean(neg_scores) if len(neg_scores) > 0 else 0,
+        'neg_score_std': np.std(neg_scores) if len(neg_scores) > 0 else 0,
+        'total_pairs': len(scores),
+        'tp': int(tp), 'tn': int(tn), 'fp': int(fp), 'fn': int(fn),
+        'scores': scores,
+        'labels': labels,
+        'predictions': predictions,
+        'pairs':pairs_info
     }
 
 
@@ -498,13 +630,240 @@ def generate_metrics_table(target_scores, non_target_scores, eer, eer_threshold,
     return csv_path, summary_path
 
 
+def evaluate_classification_accuracy(verification, classifier, valid_loader, device, 
+                                     speaker_to_idx, idx_to_speaker, loss_type='softmax'):
+    """
+    评估分类准确率
+    
+    Args:
+        verification: SpeakerRecognition 模型
+        classifier: 分类器模型
+        valid_loader: 验证数据加载器
+        device: 设备
+        speaker_to_idx: 说话人名称到索引的映射
+        idx_to_speaker: 索引到说话人名称的映射
+        loss_type: 损失函数类型
+    
+    Returns:
+        dict: 包含准确率、每类准确率等指标
+    """
+    classifier.eval()
+    
+    all_predictions = []
+    all_labels = []
+    all_scores = []
+    correct_per_speaker = {}
+    total_per_speaker = {}
+    unknown_speakers = set()
+    unknown_count = 0
+    
+    print("\n评估分类准确率...")
+    
+    with torch.no_grad():
+        for batch in tqdm(valid_loader, desc="分类评估"):
+            waveform = batch['waveform'].to(device)
+            speaker_id_str = batch['speaker_id_str'][0]
+            true_label = speaker_to_idx.get(speaker_id_str, -1)
+            
+            if true_label == -1:
+                unknown_speakers.add(speaker_id_str)
+                unknown_count += 1
+                continue
+            
+            # 提取嵌入向量
+            wav_lens = torch.ones(waveform.size(0), device=device)
+            embedding = verification.encode_batch(waveform, wav_lens).squeeze()
+            
+            # 分类预测
+            if loss_type == 'softmax':
+                logits = classifier(embedding)
+                probs = torch.softmax(logits, dim=-1)
+            else:
+                # AAM-Softmax 需要传入标签才能计算，这里用余弦相似度
+                weight = classifier.weight  # [num_classes, embedding_dim]
+                # 归一化
+                embedding_norm = torch.nn.functional.normalize(embedding, p=2, dim=-1)
+                weight_norm = torch.nn.functional.normalize(weight, p=2, dim=0)
+                # 计算余弦相似度
+                similarities = torch.matmul(weight_norm.T, embedding_norm)  # [num_classes]
+                probs = similarities
+            
+            pred_idx = torch.argmax(probs).item()
+            pred_score = probs[pred_idx].item()
+            
+            all_predictions.append(pred_idx)
+            all_labels.append(true_label)
+            all_scores.append(pred_score)
+            
+            # 统计每个说话人的准确率
+            if speaker_id_str not in total_per_speaker:
+                total_per_speaker[speaker_id_str] = 0
+                correct_per_speaker[speaker_id_str] = 0
+            total_per_speaker[speaker_id_str] += 1
+            if pred_idx == true_label:
+                correct_per_speaker[speaker_id_str] += 1
+    
+    # 检查是否有有效样本
+    if len(all_predictions) == 0:
+        print(f"\n错误: 没有有效样本可评估！")
+        print(f"  验证集中的说话人不在训练集中: {unknown_speakers}")
+        print(f"  被跳过的样本数: {unknown_count}")
+        print(f"\n请确保验证集和训练集使用相同的说话人!")
+        return None
+    
+    # 打印未知说话人统计
+    if unknown_count > 0:
+        print(f"\n警告: 跳过了 {unknown_count} 个样本（来自 {len(unknown_speakers)} 个未知说话人）")
+        print(f"  未知说话人: {unknown_speakers}")
+    
+    # 计算指标
+    all_predictions = np.array(all_predictions)
+    all_labels = np.array(all_labels)
+    all_scores = np.array(all_scores)
+    
+    accuracy = np.mean(all_predictions == all_labels)
+    
+    # 计算每个说话人的准确率
+    per_speaker_accuracy = {}
+    for spk in total_per_speaker:
+        per_speaker_accuracy[spk] = correct_per_speaker[spk] / total_per_speaker[spk]
+    
+    # 计算混淆矩阵中的关键指标
+    from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
+    
+    f1 = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
+    precision = precision_score(all_labels, all_predictions, average='macro', zero_division=0)
+    recall = recall_score(all_labels, all_predictions, average='macro', zero_division=0)
+    
+    # 混淆矩阵
+    cm = confusion_matrix(all_labels, all_predictions)
+    
+    return {
+        'accuracy': accuracy,
+        'f1': f1,
+        'precision': precision,
+        'recall': recall,
+        'per_speaker_accuracy': per_speaker_accuracy,
+        'confusion_matrix': cm,
+        'total_samples': len(all_predictions),
+        'correct_predictions': int(np.sum(all_predictions == all_labels)),
+        'unknown_count': unknown_count,
+        'unknown_speakers': unknown_speakers
+    }
+
+
+def plot_classification_report(metrics, speaker_to_idx, output_dir):
+    """生成分类评估报告图"""
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+    plt.rcParams['axes.unicode_minus'] = False
+    
+    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+    
+    # 1. 整体指标
+    ax1 = axes[0, 0]
+    metric_names = ['Accuracy', 'F1', 'Precision', 'Recall']
+    metric_values = [metrics['accuracy'], metrics['f1'], metrics['precision'], metrics['recall']]
+    colors = ['#4CAF50', '#2196F3', '#FF9800', '#9C27B0']
+    bars = ax1.bar(metric_names, [v * 100 for v in metric_values], color=colors, alpha=0.8)
+    ax1.set_ylabel('Percentage (%)')
+    ax1.set_title('Overall Classification Metrics')
+    ax1.set_ylim([0, 105])
+    for bar, val in zip(bars, metric_values):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                f'{val*100:.2f}%', ha='center', va='bottom', fontsize=11)
+    ax1.grid(True, alpha=0.3, axis='y')
+    
+    # 2. 每个说话人的准确率
+    ax2 = axes[0, 1]
+    speakers = list(metrics['per_speaker_accuracy'].keys())
+    accuracies = [metrics['per_speaker_accuracy'][s] for s in speakers]
+    
+    # 按准确率排序
+    sorted_idx = np.argsort(accuracies)
+    speakers = [speakers[i] for i in sorted_idx]
+    accuracies = [accuracies[i] for i in sorted_idx]
+    
+    # 只显示前20和后20（如果说话人太多）
+    if len(speakers) > 40:
+        speakers = speakers[:20] + speakers[-20:]
+        accuracies = accuracies[:20] + accuracies[-20:]
+    
+    colors = ['#f44336' if acc < 0.8 else '#4CAF50' for acc in accuracies]
+    ax2.barh(speakers, [a * 100 for a in accuracies], color=colors, alpha=0.7)
+    ax2.set_xlabel('Accuracy (%)')
+    ax2.set_title('Per-Speaker Accuracy (sorted)')
+    ax2.set_xlim([0, 105])
+    ax2.axvline(x=80, color='orange', linestyle='--', linewidth=2, label='80% threshold')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='x')
+    
+    # 3. 准确率分布直方图
+    ax3 = axes[1, 0]
+    all_accs = list(metrics['per_speaker_accuracy'].values())
+    ax3.hist([a * 100 for a in all_accs], bins=20, color='#2196F3', alpha=0.7, edgecolor='white')
+    ax3.axvline(x=np.mean(all_accs) * 100, color='red', linestyle='--', linewidth=2, 
+                label=f'Mean: {np.mean(all_accs)*100:.2f}%')
+    ax3.set_xlabel('Accuracy (%)')
+    ax3.set_ylabel('Number of Speakers')
+    ax3.set_title('Distribution of Per-Speaker Accuracy')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # 4. 统计信息表格
+    ax4 = axes[1, 1]
+    ax4.axis('off')
+    
+    all_accs = list(metrics['per_speaker_accuracy'].values())
+    table_data = [
+        ['Metric', 'Value'],
+        ['Overall Accuracy', f'{metrics["accuracy"]*100:.4f}%'],
+        ['F1 Score (Macro)', f'{metrics["f1"]*100:.4f}%'],
+        ['Precision (Macro)', f'{metrics["precision"]*100:.4f}%'],
+        ['Recall (Macro)', f'{metrics["recall"]*100:.4f}%'],
+        ['Total Samples', f'{metrics["total_samples"]}'],
+        ['Correct Predictions', f'{metrics["correct_predictions"]}'],
+        ['Number of Speakers', f'{len(metrics["per_speaker_accuracy"])}'],
+        ['Min Speaker Accuracy', f'{min(all_accs)*100:.2f}%'],
+        ['Max Speaker Accuracy', f'{max(all_accs)*100:.2f}%'],
+        ['Std Speaker Accuracy', f'{np.std(all_accs)*100:.2f}%'],
+    ]
+    
+    table = ax4.table(cellText=table_data, loc='center', cellLoc='center',
+                      colWidths=[0.5, 0.5])
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1.2, 1.5)
+    
+    for i in range(2):
+        table[(0, i)].set_facecolor('#4472C4')
+        table[(0, i)].set_text_props(color='white', fontweight='bold')
+    
+    ax4.set_title('Classification Summary', pad=20)
+    
+    plt.suptitle('Speaker Classification Evaluation Report', fontsize=16, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    report_path = os.path.join(output_dir, 'classification_report.png')
+    plt.savefig(report_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+    
+    print(f"分类报告已保存: {report_path}")
+    
+    return report_path
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='模型评估脚本')
     parser.add_argument('--checkpoint', type=str, default='checkpoints/classifier_final.pt', help='模型检查点路径')
     parser.add_argument('--config', type=str, default='config/config.yaml', help='配置文件路径')
     parser.add_argument('--output', type=str, default='logs/metrics', help='输出目录')
-    parser.add_argument('--sample_ratio', type=float, default=0.1, help='采样比例（用于加速评估）')
+    parser.add_argument('--sample_ratio', type=float, default=0.1, help='采样比例（用于加速验证评估）')
+    parser.add_argument('--mode', type=str, default='pairs', 
+                       choices=['classification', 'verification', 'both', 'pairs'],
+                       help='评估模式: pairs(验证对准确率), classification(分类准确率), verification(验证EER), both(两者)')
+    parser.add_argument('--pairs_csv', type=str, default='data/valid_pairs.csv', help='音频对CSV文件路径')
+    parser.add_argument('--threshold', type=float, default=0.5, help='相似度阈值')
     args = parser.parse_args()
     
     # 加载配置
@@ -551,85 +910,239 @@ def main():
     print(f"分类器类型: {loss_type}")
     print(f"说话人数量: {num_speakers}")
     
-    # 加载验证数据集
-    print(f"\n加载验证数据集...")
-    sample_rate = config['audio']['sample_rate']
-    valid_dataset = SpeakerDataset(
-        csv_path=config['data']['valid_csv'],
-        audio_dir=config['data']['valid_dir'],
-        sample_rate=sample_rate
-    )
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=1,  # 单个样本处理
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=0
-    )
+    # 创建说话人映射
+    idx_to_speaker = {v: k for k, v in speaker_to_idx.items()}
     
-    print(f"验证集样本数: {len(valid_dataset)}")
+    # 根据模式选择评估方式
+    generated_files = []
     
-    # 提取所有嵌入向量
-    print(f"\n提取嵌入向量...")
-    embeddings_dict = {}  # {speaker_id: [embeddings]}
+    # ========== 验证对准确率评估 ==========
+    if args.mode in ['pairs', 'both']:
+        print(f"\n{'='*60}")
+        print("说话人验证对准确率评估")
+        print(f"{'='*60}")
+        
+        pairs_metrics = evaluate_verification_pairs(
+            verification, 
+            config['data']['valid_csv'], 
+            config['data']['valid_dir'], 
+            device,
+            threshold=args.threshold
+        )
+        
+        print(f"\n{'='*50}")
+        print(f"验证对评估结果")
+        print(f"{'='*50}")
+        print(f"阈值: {pairs_metrics['threshold']:.4f}")
+        print(f"准确率: {pairs_metrics['accuracy']*100:.2f}%")
+        print(f"精确率: {pairs_metrics['precision']*100:.2f}%")
+        print(f"召回率: {pairs_metrics['recall']*100:.2f}%")
+        print(f"F1 Score: {pairs_metrics['f1']*100:.2f}%")
+        print(f"EER: {pairs_metrics['eer']*100:.2f}% (最佳阈值: {pairs_metrics['eer_threshold']:.4f})")
+        print(f"\n分数统计:")
+        print(f"  正样本相似度: {pairs_metrics['pos_score_mean']:.4f} ± {pairs_metrics['pos_score_std']:.4f}")
+        print(f"  负样本相似度: {pairs_metrics['neg_score_mean']:.4f} ± {pairs_metrics['neg_score_std']:.4f}")
+        print(f"\n混淆矩阵:")
+        print(f"  TP={pairs_metrics['tp']}, TN={pairs_metrics['tn']}")
+        print(f"  FP={pairs_metrics['fp']}, FN={pairs_metrics['fn']}")
+        print(f"\n总样本对数: {pairs_metrics['total_pairs']}")
+        
+        # 保存结果到 CSV
+        pairs_csv_output = os.path.join(args.output, 'verification_results.csv')
+        with open(pairs_csv_output, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['audio1', 'audio2', 'true_label', 'predicted_label', 'similarity'])
+            for i, (audio1, audio2, true_label) in enumerate(pairs_metrics['pairs']):
+                if i < len(pairs_metrics['scores']):
+                    writer.writerow([
+                        audio1,
+                        audio2,
+                        pairs_metrics['labels'][i],
+                        pairs_metrics['predictions'][i],
+                        f"{pairs_metrics['scores'][i]:.4f}"
+                    ])
+        print(f"\n详细结果已保存: {pairs_csv_output}")
+        generated_files.append(('验证对结果', pairs_csv_output))
+        
+        # 绘制分数分布图
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        # 分数分布直方图
+        ax1 = axes[0]
+        scores = pairs_metrics['scores']
+        labels_arr = pairs_metrics['labels']
+        pos_scores = scores[labels_arr == 1]
+        neg_scores = scores[labels_arr == 0]
+        ax1.hist(pos_scores, bins=30, alpha=0.7, label=f'Same Speaker (n={len(pos_scores)})', color='green')
+        ax1.hist(neg_scores, bins=30, alpha=0.7, label=f'Different Speaker (n={len(neg_scores)})', color='red')
+        ax1.axvline(x=pairs_metrics['threshold'], color='blue', linestyle='--', linewidth=2, 
+                   label=f"Threshold = {pairs_metrics['threshold']:.4f}")
+        ax1.axvline(x=pairs_metrics['eer_threshold'], color='orange', linestyle=':', linewidth=2,
+                   label=f"EER Threshold = {pairs_metrics['eer_threshold']:.4f}")
+        ax1.set_xlabel('Cosine Similarity')
+        ax1.set_ylabel('Count')
+        ax1.set_title('Score Distribution')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 混淆矩阵可视化
+        ax2 = axes[1]
+        cm = np.array([[pairs_metrics['tn'], pairs_metrics['fp']], 
+                       [pairs_metrics['fn'], pairs_metrics['tp']]])
+        im = ax2.imshow(cm, cmap='Blues')
+        ax2.set_xticks([0, 1])
+        ax2.set_yticks([0, 1])
+        ax2.set_xticklabels(['Predicted 0', 'Predicted 1'])
+        ax2.set_yticklabels(['Actual 0', 'Actual 1'])
+        for i in range(2):
+            for j in range(2):
+                ax2.text(j, i, cm[i, j], ha='center', va='center', fontsize=16, fontweight='bold')
+        ax2.set_title(f'Confusion Matrix\nAccuracy: {pairs_metrics["accuracy"]*100:.2f}%')
+        plt.colorbar(im, ax=ax2)
+        
+        plt.tight_layout()
+        fig_path = os.path.join(args.output, 'verification_pairs_report.png')
+        plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"报告图已保存: {fig_path}")
+        generated_files.append(('验证对报告图', fig_path))
     
-    with torch.no_grad():
-        for batch in tqdm(valid_loader, desc="提取嵌入向量"):
-            waveform = batch['waveform'].to(device)
-            speaker_id = batch['speaker_id'][0]
-            speaker_name = batch['speaker_id_str'][0]
+    # ========== 加载验证数据集（仅 classification/verification 模式需要）==========
+    if args.mode in ['classification', 'verification', 'both']:
+        print(f"\n加载验证数据集...")
+        sample_rate = config['audio']['sample_rate']
+        valid_dataset = SpeakerDataset(
+            csv_path=config['data']['valid_csv'],
+            audio_dir=config['data']['valid_dir'],
+            sample_rate=sample_rate
+        )
+        valid_loader = DataLoader(
+            valid_dataset,
+            batch_size=1,  # 单个样本处理
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=0
+        )
+        print(f"验证集样本数: {len(valid_dataset)}")
+    
+    # ========== 分类准确率评估 ==========
+    if args.mode in ['classification', 'both']:
+        print(f"\n{'='*60}")
+        print("分类准确率评估")
+        print(f"{'='*60}")
+        
+        # 需要重新创建 DataLoader，使用批量处理加速
+        valid_loader_batch = DataLoader(
+            valid_dataset,
+            batch_size=16,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=0
+        )
+        
+        cls_metrics = evaluate_classification_accuracy(
+            verification, classifier, valid_loader_batch, device,
+            speaker_to_idx, idx_to_speaker, loss_type
+        )
+        
+        if cls_metrics is None:
+            print("\n无法进行分类评估，请检查训练集和验证集的说话人是否一致！")
+        else:
+            print(f"\n{'='*50}")
+            print(f"分类评估结果")
+            print(f"{'='*50}")
+            print(f"准确率: {cls_metrics['accuracy']*100:.4f}%")
+            print(f"F1 Score: {cls_metrics['f1']*100:.4f}%")
+            print(f"Precision: {cls_metrics['precision']*100:.4f}%")
+            print(f"Recall: {cls_metrics['recall']*100:.4f}%")
+            print(f"总样本数: {cls_metrics['total_samples']}")
+            print(f"正确预测数: {cls_metrics['correct_predictions']}")
+            if cls_metrics.get('unknown_count', 0) > 0:
+                print(f"跳过的未知样本: {cls_metrics['unknown_count']}")
             
-            # 提取嵌入向量
-            wav_lens = torch.ones(waveform.size(0), device=device)
-            embedding = verification.encode_batch(waveform, wav_lens).squeeze().cpu()
-            
-            if speaker_name not in embeddings_dict:
-                embeddings_dict[speaker_name] = []
-            embeddings_dict[speaker_name].append(embedding)
+            # 生成分类报告
+            cls_report_path = plot_classification_report(cls_metrics, speaker_to_idx, args.output)
+            generated_files.append(('分类报告图', cls_report_path))
+        
+        # 保存详细CSV
+        cls_csv_path = os.path.join(args.output, 'classification_per_speaker.csv')
+        with open(cls_csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['speaker_id', 'accuracy', 'total_samples'])
+            for spk, acc in sorted(cls_metrics['per_speaker_accuracy'].items()):
+                writer.writerow([spk, f'{acc*100:.4f}%', 
+                               sum(1 for s in valid_dataset.df['speaker_id'] if s == spk)])
+        generated_files.append(('每说话人准确率表', cls_csv_path))
+        print(f"每说话人准确率已保存: {cls_csv_path}")
     
-    print(f"\n共提取 {len(embeddings_dict)} 个说话人的嵌入向量")
-    for spk, embs in embeddings_dict.items():
-        print(f"  {spk}: {len(embs)} 个样本")
-    
-    # 评估所有说话人对
-    target_scores, non_target_scores = evaluate_all_pairs(
-        embeddings_dict, 
-        list(embeddings_dict.keys()),
-        sample_ratio=args.sample_ratio
-    )
-    
-    # 计算评估指标
-    print("\n计算评估指标...")
-    eer, eer_threshold, far, mr = compute_eer(target_scores, non_target_scores)
-    min_dcf = compute_min_dcf(target_scores, non_target_scores)
-    
-    print(f"\n{'='*50}")
-    print(f"评估结果")
-    print(f"{'='*50}")
-    print(f"EER: {eer*100:.4f}%")
-    print(f"EER阈值: {eer_threshold:.4f}")
-    print(f"minDCF: {min_dcf:.4f}")
-    print(f"正样本对数: {len(target_scores)}")
-    print(f"负样本对数: {len(non_target_scores)}")
-    
-    # 生成报告
-    model_name = f"Fine-tuned ECAPA-TDNN ({loss_type})"
-    report_path = plot_comprehensive_report(
-        target_scores, non_target_scores, eer, eer_threshold,
-        min_dcf, args.output, model_name
-    )
-    
-    # 生成表格
-    csv_path, summary_path = generate_metrics_table(
-        target_scores, non_target_scores, eer, eer_threshold,
-        min_dcf, args.output
-    )
+    # ========== 说话人验证评估 (EER) ==========
+    if args.mode in ['verification', 'both']:
+        print(f"\n{'='*60}")
+        print("说话人验证评估 (EER)")
+        print(f"{'='*60}")
+        
+        # 提取所有嵌入向量
+        print(f"\n提取嵌入向量...")
+        embeddings_dict = {}  # {speaker_id: [embeddings]}
+        
+        with torch.no_grad():
+            for batch in tqdm(valid_loader, desc="提取嵌入向量"):
+                waveform = batch['waveform'].to(device)
+                speaker_name = batch['speaker_id_str'][0]
+                
+                # 提取嵌入向量
+                wav_lens = torch.ones(waveform.size(0), device=device)
+                embedding = verification.encode_batch(waveform, wav_lens).squeeze().cpu()
+                
+                if speaker_name not in embeddings_dict:
+                    embeddings_dict[speaker_name] = []
+                embeddings_dict[speaker_name].append(embedding)
+        
+        print(f"\n共提取 {len(embeddings_dict)} 个说话人的嵌入向量")
+        
+        # 评估所有说话人对
+        target_scores, non_target_scores = evaluate_all_pairs(
+            embeddings_dict, 
+            list(embeddings_dict.keys()),
+            sample_ratio=args.sample_ratio
+        )
+        
+        # 计算评估指标
+        print("\n计算评估指标...")
+        eer, eer_threshold, far, mr = compute_eer(target_scores, non_target_scores)
+        min_dcf = compute_min_dcf(target_scores, non_target_scores)
+        
+        print(f"\n{'='*50}")
+        print(f"验证评估结果")
+        print(f"{'='*50}")
+        print(f"EER: {eer*100:.4f}%")
+        print(f"EER阈值: {eer_threshold:.4f}")
+        print(f"minDCF: {min_dcf:.4f}")
+        print(f"正样本对数: {len(target_scores)}")
+        print(f"负样本对数: {len(non_target_scores)}")
+        
+        # 生成报告
+        model_name = f"Fine-tuned ECAPA-TDNN ({loss_type})"
+        report_path = plot_comprehensive_report(
+            target_scores, non_target_scores, eer, eer_threshold,
+            min_dcf, args.output, model_name
+        )
+        generated_files.append(('验证报告图', report_path))
+        
+        # 生成表格
+        csv_path, summary_path = generate_metrics_table(
+            target_scores, non_target_scores, eer, eer_threshold,
+            min_dcf, args.output
+        )
+        generated_files.extend([
+            ('阈值分析表', csv_path),
+            ('验证汇总表', summary_path)
+        ])
     
     print(f"\n{'='*50}")
     print("评估完成！生成的文件：")
-    print(f"  - 评估报告图: {report_path}")
-    print(f"  - 阈值分析表: {csv_path}")
-    print(f"  - 评估汇总表: {summary_path}")
+    for name, path in generated_files:
+        print(f"  - {name}: {path}")
     print(f"{'='*50}")
 
 

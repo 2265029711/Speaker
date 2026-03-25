@@ -341,14 +341,16 @@ def plot_pretrain_comparison(pretrain_metrics: Dict[str, float],
     for i, m in enumerate(common_metrics):
         if 'loss' in m.lower() or 'eer' in m.lower() or 'dcf' in m.lower():
             # 越小越好
-            improvement = (pretrain_vals[i] - finetuned_vals[i]) / pretrain_vals[i] * 100
-            if improvement > 0:
-                improvements.append(f"{m}: ↓{improvement:.1f}%")
+            if pretrain_vals[i] != 0:
+                improvement = (pretrain_vals[i] - finetuned_vals[i]) / pretrain_vals[i] * 100
+                if improvement > 0:
+                    improvements.append(f"{m}: ↓{improvement:.1f}%")
         else:
             # 越大越好
-            improvement = (finetuned_vals[i] - pretrain_vals[i]) / pretrain_vals[i] * 100 if pretrain_vals[i] != 0 else 0
-            if improvement > 0:
-                improvements.append(f"{m}: ↑{improvement:.1f}%")
+            if pretrain_vals[i] != 0:
+                improvement = (finetuned_vals[i] - pretrain_vals[i]) / pretrain_vals[i] * 100
+                if improvement > 0:
+                    improvements.append(f"{m}: ↑{improvement:.1f}%")
     
     if improvements:
         improvement_text = "Performance Improvement:\n" + "\n".join(improvements)

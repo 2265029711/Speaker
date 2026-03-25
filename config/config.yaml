@@ -17,19 +17,24 @@ model:
 
 # 训练配置
 training:
-  batch_size: 8             # RTX 3060 显存优化
-  learning_rate: 0.001
-  weight_decay: 1e-4        # L2正则化，增大防止过拟合
-  epochs: 30                # 增加最大轮数，配合早停
-  num_workers: 2            # 减少内存占用
+  batch_size: 64            # 10×RTX 2080 Ti 并行训练，每卡约6-7样本
+  learning_rate: 0.0003     # 降低学习率，配合更大batch_size
+  weight_decay: 5e-4        # 增强L2正则化，防止过拟合
+  epochs: 30                # 适训练轮数，早停机制会提前终止
+  num_workers: 8            # 利用440GB内存，加速数据加载
   device: "cuda"            # cuda 或 cpu
   
   # 早停配置
   early_stopping:
     enabled: true           # 是否启用早停
-    patience: 5             # 容忍轮数（连续N轮无改善则停止）
+    patience: 5             # 容忍轮数
     min_delta: 0.001        # 最小改善幅度
-    monitor: "val_eer"      # 监控指标
+    monitor: "val_eer"      # 单指标模式监控指标
+    # 混合指标模式（准确率优先）
+    use_hybrid: true        # 启用混合指标模式
+    accuracy_weight: 0.85    # 准确率权重
+    eer_weight: 0.15         # EER权重
+    accuracy_threshold: 0.95 # 准确率阈值，低于此值时优先提升准确率
   
   # 损失函数配置
   loss_type: "aam_softmax"  # 可选: softmax, aam_softmax, subcenter_aam, combined
@@ -38,10 +43,10 @@ training:
   
   # Backbone 微调配置
   finetune_backbone: true   # 是否微调 ECAPA-TDNN backbone
-  backbone_lr_scale: 0.1    # backbone 学习率 = learning_rate * backbone_lr_scale
+  backbone_lr_scale: 0.1    # backbone 学习率 = 0.0003 * 0.1 = 0.00003
   
   # Dropout配置
-  dropout: 0.1              # Dropout概率，防止过拟合
+  dropout: 0.3              # Dropout概率，增强正则化防止过拟合
 
 # 数据路径
 data:

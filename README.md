@@ -1,10 +1,10 @@
 # 声纹识别系统
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
-[![PyTorch 2.10](https://img.shields.io/badge/PyTorch-2.10-orange.svg)](https://pytorch.org/)
-[![SpeechBrain 1.0](https://img.shields.io/badge/SpeechBrain-1.0-green.svg)](https://speechbrain.github.io/)
-[![CUDA 13.0](https://img.shields.io/badge/CUDA-13.0-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![PyTorch 2.6](https://img.shields.io/badge/PyTorch-2.6-orange.svg)](https://pytorch.org/)
+[![SpeechBrain 1.0](https://img.shields.io/badge/SpeechBrain-1.0.3-green.svg)](https://speechbrain.github.io/)
+[![CUDA 12.4](https://img.shields.io/badge/CUDA-12.4-green.svg)](https://developer.nvidia.com/cuda-toolkit)
 
 基于 ECAPA-TDNN 的声纹识别系统，支持说话人验证、辨认及模型微调。
 
@@ -19,36 +19,202 @@
 
 ## 环境依赖
 
-- Python 3.11+
-- PyTorch 2.10.0+ (CUDA 13.0)
-- SpeechBrain 1.0.3
+### 系统要求
+
+| 软件 | 版本要求 | 说明 |
+|------|----------|------|
+| Python | 3.10+ | 编程语言环境 |
+| CUDA | 12.4 | GPU 加速 |
+| FFmpeg | 7.1.2 | 音频解码、格式转换 |
+
+#### FFmpeg 安装
+
+**Windows:**
+```bash
+# 方法1: 使用 conda 安装
+conda install ffmpeg -c conda-forge
+
+# 方法2: 使用 pip 安装 imageio-ffmpeg（轻量级）
+pip install imageio-ffmpeg
+
+# 方法3: 手动安装
+# 1. 从 https://www.gyan.dev/ffmpeg/builds/ 下载 ffmpeg-release-essentials.zip
+# 2. 解压到任意目录（如 E:\ffmpeg）
+# 3. 将 bin 目录添加到系统 PATH 环境变量
+```
+
+**Linux:**
+```bash
+sudo apt install ffmpeg  # Ubuntu/Debian
+sudo yum install ffmpeg  # CentOS/RHEL
+```
+
+**macOS:**
+```bash
+brew install ffmpeg
+```
+
+### 核心依赖
+
+以下为 `jj1` 虚拟环境测试通过的版本：
+
+| 包名 | 版本 | 说明 |
+|------|------|------|
+| torch | 2.6.0+cu124 | PyTorch 深度学习框架 |
+| torchaudio | 2.6.0+cu124 | 音频处理工具 |
+| torchcodec | 0.10.0 | 视频音频编解码（调用 FFmpeg） |
+| speechbrain | 1.0.3 | 语音处理框架 |
+| numpy | 2.3.5 | 数值计算 |
+| pandas | 3.0.1 | 数据处理 |
+| PyYAML | 6.0.3 | 配置文件解析 |
+| scipy | 1.17.1 | 科学计算 |
+| matplotlib | 3.10.8 | 可视化绑图 |
+| scikit-learn | 1.8.0 | 机器学习工具 |
+| tqdm | 4.67.3 | 进度条显示 |
+| soundfile | 0.13.1 | 音频文件读写 |
+| ffmpeg | 1.4 | FFmpeg Python 绑定 |
 
 ## 安装方法
 
+### 1. 创建虚拟环境
+
+默认使用 conda 虚拟环境 `jj1`：
+
 ```bash
-# PyTorch (CUDA 13.0)
-pip install torch==2.10.0+cu130 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
+# 创建虚拟环境
+conda create -n jj1 python=3.10
 
-# SpeechBrain
-pip install speechbrain==1.0.3
-
-# 其他依赖
-pip install numpy pyyaml scipy soundfile matplotlib seaborn scikit-learn pandas tqdm
+# 激活环境
+conda activate jj1
 ```
+
+### 2. 安装 PyTorch 和 torchaudio
+
+根据你的 CUDA 版本选择对应的安装命令：
+
+```bash
+# CUDA 12.4 (推荐)
+pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+
+# CPU 版本
+pip install torch==2.6.0+cpu torchaudio==2.6.0+cpu --index-url https://download.pytorch.org/whl/cpu
+```
+
+### 3. 安装 torchcodec（FFmpeg 后端）
+
+```bash
+pip install torchcodec==0.10.0
+```
+
+### 4. 安装 SpeechBrain
+
+```bash
+pip install speechbrain==1.0.3
+```
+
+### 5. 安装其他依赖
+
+```bash
+# 数据处理
+pip install numpy==2.3.5 pandas==3.0.1 PyYAML==6.0.3 scipy==1.17.1
+
+# 可视化
+pip install matplotlib==3.10.8
+
+# 机器学习工具
+pip install scikit-learn==1.8.0
+
+# 进度条
+pip install tqdm==4.67.3
+
+# 音频读写
+pip install soundfile==0.13.1
+
+# FFmpeg Python 绑定
+pip install ffmpeg==1.4
+```
+
+### 6. 一键安装（推荐）
+
+使用以下命令一次性安装所有依赖（指定版本）：
+
+```bash
+pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --index-url https://download.pytorch.org/whl/cu124
+pip install torchcodec==0.10.0 speechbrain==1.0.3 numpy==2.3.5 pandas==3.0.1 PyYAML==6.0.3 scipy==1.17.1 matplotlib==3.10.8 scikit-learn==1.8.0 tqdm==4.67.3 soundfile==0.13.1 ffmpeg==1.4
+```
+
+> **注意**: `torch` 和 `torchaudio` 需要从 PyTorch 官方源安装，其他包可从 PyPI 安装。
 
 ## 快速开始
 
+### 1. 模型训练
+
 ```bash
-# 1. 训练模型（可选，可直接使用预训练模型）
+# 基本训练（使用默认配置）
 python scripts/train.py
 
-# 2. 注册声纹（使用训练后的模型）
+# 指定配置文件
+python scripts/train.py --config config/config.yaml
+```
+
+**训练参数说明：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--config` | config/config.yaml | 配置文件路径 |
+
+**训练输出：**
+- `checkpoints/classifier_best.pt` - 最佳模型（训练准确率最高）
+- `checkpoints/classifier_final.pt` - 最终模型
+- `checkpoints/classifier_epoch_N.pt` - 每 5 轮保存的检查点
+- `logs/metrics/epoch_N_metrics.png` - 每轮训练指标图
+- `logs/metrics/training_trends.png` - 训练趋势图
+
+### 2. 模型验证
+
+```bash
+# 验证对准确率评估（推荐）
+python scripts/evaluate_model.py --mode pairs --pairs_csv data/valid_pairs.csv
+
+# 分类准确率评估
+python scripts/evaluate_model.py --mode classification --checkpoint checkpoints/classifier_final.pt
+
+# 说话人验证 EER 评估
+python scripts/evaluate_model.py --mode verification --checkpoint checkpoints/classifier_final.pt
+
+# 综合评估（所有模式）
+python scripts/evaluate_model.py --mode both --checkpoint checkpoints/classifier_final.pt
+```
+
+**验证参数说明：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--checkpoint` | checkpoints/classifier_final.pt | 模型检查点路径 |
+| `--config` | config/config.yaml | 配置文件路径 |
+| `--output` | logs/metrics | 输出目录 |
+| `--mode` | pairs | 评估模式：pairs/classification/verification/both |
+| `--pairs_csv` | data/valid_pairs.csv | 验证对CSV文件路径 |
+| `--threshold` | 0.5 | 相似度阈值 |
+| `--sample_ratio` | 0.1 | 采样比例（加速验证评估） |
+
+**验证输出：**
+- `logs/metrics/verification_results.csv` - 验证对结果详情
+- `logs/metrics/verification_pairs_report.png` - 验证对报告图
+- `logs/metrics/classification_report.png` - 分类报告图
+- `logs/metrics/model_evaluation_report.png` - 综合评估报告
+- `logs/metrics/evaluation_summary.csv` - 评估汇总表
+
+### 3. 声纹注册与认证
+
+```bash
+# 注册声纹（使用训练后的模型）
 python scripts/enroll.py --user_id user_001 --audio path/to/voice.wav --checkpoint checkpoints/classifier_final.pt
 
-# 3. 身份认证
+# 1:1 身份认证
 python scripts/verify.py --user_id user_001 --audio path/to/test.wav --checkpoint checkpoints/classifier_final.pt
 
-# 4. 说话人辨认
+# 1:N 说话人辨认
 python scripts/verify.py --audio path/to/test.wav --identify --checkpoint checkpoints/classifier_final.pt
 ```
 
