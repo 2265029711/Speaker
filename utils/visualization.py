@@ -3,54 +3,212 @@
 包含：DET曲线、特征可视化、训练指标可视化等
 """
 
+from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, f1_score, precision_score, recall_score
-from typing import List, Optional, Dict
 import os
+
+
+def _format_metric_name(metric_name: str) -> str:
+    """将内部指标名称转换为适合展示的标签。"""
+    tokens = metric_name.replace('-', '_').split('_')
+    prefix_labels = {
+        'train': 'Train',
+        'val': 'Validation',
+        'valid': 'Validation',
+        'test': 'Test',
+    }
+    metric_labels = {
+        'acc': 'Accuracy',
+        'accuracy': 'Accuracy',
+        'f1': 'F1 Score',
+        'eer': 'EER',
+        'min': 'Min',
+        'dcf': 'DCF',
+        'loss': 'Loss',
+        'precision': 'Precision',
+        'recall': 'Recall',
+    }
+
+    formatted = []
+    for token in tokens:
+        lower = token.lower()
+        formatted.append(metric_labels.get(lower, token.title()))
+
+    if tokens and tokens[0].lower() in prefix_labels:
+        formatted[0] = prefix_labels[tokens[0].lower()]
+
+    return ' '.join(formatted)
+
+
+def _metric_family(metric_name: str) -> str:
+    """将指标归类为损失类、性能类或误差类。"""
+    lower = metric_name.lower()
+    if 'loss' in lower:
+        return 'loss'
+    if 'eer' in lower or 'dcf' in lower:
+        return 'error'
+    return 'score'
+
+
+def _metric_base_name(metric_name: str) -> str:
+    """移除 `train_`、`val_` 等数据集前缀，保留指标主体名称。"""
+    tokens = metric_name.lower().replace('-', '_').split('_')
+    if tokens and tokens[0] in {'train', 'val', 'valid', 'test'}:
+        tokens = tokens[1:]
+    return '_'.join(tokens) if tokens else metric_name.lower()
+
+
+def _series_style(metric_name: str) -> Dict[str, str]:
+    """为指标曲线返回稳定的颜色和线型配置。"""
+    base_name = _metric_base_name(metric_name)
+    palette = {
+        'loss': '#C44E52',
+        'accuracy': '#4C72B0',
+        'f1': '#55A868',
+        'precision': '#8172B2',
+        'recall': '#CCB974',
+        'eer': '#DD8452',
+        'min_dcf': '#64B5CD',
+    }
+    lower = metric_name.lower()
+    if lower.startswith('val_') or lower.startswith('valid_'):
+        line_style = '--'
+    elif lower.startswith('test_'):
+        line_style = ':'
+    else:
+        line_style = '-'
+
+    return {
+        'color': palette.get(base_name, '#5F6B7A'),
+        'linestyle': line_style,
+    }
+
+
+def _style_axis(ax: Any) -> None:
+    """为坐标轴应用更适合学术图表的轻量样式。"""
+    ax.grid(True, axis='y', linestyle='--', linewidth=0.8, alpha=0.22)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_color('#B8C0CC')
+    ax.spines['bottom'].set_color('#B8C0CC')
+    ax.tick_params(labelsize=10)
+
+
+def _annotate_bar_values(
+    ax: Any,
+    bars: Sequence[Any],
+    value_fmt: str = '{:.4f}',
+    inside_threshold: float = 0.18,
+) -> None:
+    """为水平条形图添加数值标注，并尽量避免与条形边界重叠。"""
+    x_min, x_max = ax.get_xlim()
+    span = max(x_max - x_min, 1e-8)
+    for bar in bars:
+        value = bar.get_width()
+        y = bar.get_y() + bar.get_height() / 2
+        if span > 0 and value > inside_threshold * span:
+            ax.text(value - 0.02 * span, y, value_fmt.format(value),
+                    va='center', ha='right', fontsize=10, color='white', fontweight='bold')
+        else:
+            ax.text(value + 0.015 * span, y, value_fmt.format(value),
+                    va='center', ha='left', fontsize=10, color='#2F3B4A')
+
+
+def _place_inline_labels(ax: Any, label_specs: List[Dict[str, Any]], x_position: float) -> None:
+    """在线尾放置标签，并做简单的碰撞规避。"""
+    if not label_specs:
+        return
+
+    y_min, y_max = ax.get_ylim()
+    span = max(y_max - y_min, 1e-8)
+    min_gap = span * 0.08
+    lower_bound = y_min + span * 0.04
+    upper_bound = y_max - span * 0.04
+
+    ordered = sorted(
+        [
+            {'index': idx, **spec}
+            for idx, spec in enumerate(label_specs)
+        ],
+        key=lambda item: item['y']
+    )
+
+    adjusted = [item['y'] for item in ordered]
+    for idx in range(1, len(adjusted)):
+        adjusted[idx] = max(adjusted[idx], adjusted[idx - 1] + min_gap)
+
+    overflow = adjusted[-1] - upper_bound
+    if overflow > 0:
+        adjusted = [value - overflow for value in adjusted]
+
+    if adjusted[0] < lower_bound:
+        shift = lower_bound - adjusted[0]
+        adjusted = [value + shift for value in adjusted]
+
+    for item, adjusted_y in zip(ordered, adjusted):
+        ax.text(
+            x_position,
+            adjusted_y,
+            item['label'],
+            color=item['color'],
+            fontsize=10,
+            va='center',
+            ha='left',
+            clip_on=False,
+        )
+        ax.plot(
+            [item['x'], x_position - 0.04 * max(x_position, 1)],
+            [item['y'], adjusted_y],
+            color=item['color'],
+            linewidth=1.0,
+            alpha=0.65,
+            clip_on=False,
+        )
 
 
 def plot_det_curve(scores: List[float], 
                    labels: List[int],
                    title: str = "DET Curve",
-                   save_path: Optional[str] = None):
+                   save_path: Optional[str] = None) -> None:
     """
-    绘制检测误差权衡曲线 (Detection Error Trade-off Curve)
+    绘制检测误差权衡曲线（DET 曲线）。
     
     Args:
-        scores: 相似度得分列表
-        labels: 真实标签列表 (1=同一说话人, 0=不同说话人)
-        title: 图表标题
-        save_path: 保存路径（可选）
+        scores: 相似度得分序列。
+        labels: 二分类标签，`1` 表示同一说话人。
+        title: 图表标题。
+        save_path: 可选的保存路径。
     """
     scores = np.array(scores)
     labels = np.array(labels)
     
-    # 计算FPR和FNR
+    # 计算误报率（FPR）和漏拒率（FNR）。
     fpr, tpr, thresholds = roc_curve(labels, scores, pos_label=1)
     fnr = 1 - tpr
     
-    # 创建DET曲线（使用对数坐标）
+    # 使用对数坐标绘制 DET 曲线。
     plt.figure(figsize=(8, 6))
     plt.plot(fpr, fnr, linewidth=2, label='DET Curve')
     
-    # 设置对数坐标
+    # 设置对数坐标轴。
     plt.xscale('log')
     plt.yscale('log')
     
-    # 设置坐标轴范围和标签
+    # 设置坐标轴范围和标签。
     plt.xlim([0.001, 1])
     plt.ylim([0.001, 1])
     plt.xlabel('False Acceptance Rate (FAR)', fontsize=12)
     plt.ylabel('False Rejection Rate (FRR)', fontsize=12)
     plt.title(title, fontsize=14)
     
-    # 添加EER点（对角线交点）
+    # 标出 EER 对应的近似交点。
     eer_idx = np.argmin(np.abs(fpr - fnr))
     eer = (fpr[eer_idx] + fnr[eer_idx]) / 2
     plt.scatter([eer], [eer], color='red', s=100, zorder=5, label=f'EER = {eer:.4f}')
     
-    # 添加对角线
+    # 添加参考对角线。
     plt.plot([0.001, 1], [0.001, 1], 'k--', alpha=0.3, label='EER Line')
     
     plt.legend(loc='upper right')
@@ -66,22 +224,22 @@ def plot_det_curve(scores: List[float],
 def plot_score_distribution(target_scores: List[float],
                             non_target_scores: List[float],
                             title: str = "Score Distribution",
-                            save_path: Optional[str] = None):
+                            save_path: Optional[str] = None) -> None:
     """
-    绘制得分分布直方图
+    绘制目标分数与非目标分数的重叠直方图。
     
     Args:
-        target_scores: 目标说话人得分
-        non_target_scores: 非目标说话人得分
-        title: 图表标题
-        save_path: 保存路径（可选）
+        target_scores: 同一说话人配对的得分序列。
+        non_target_scores: 不同说话人配对的得分序列。
+        title: 图表标题。
+        save_path: 可选的保存路径。
     """
     target_scores = np.array(target_scores)
     non_target_scores = np.array(non_target_scores)
     
     plt.figure(figsize=(10, 6))
     
-    # 绘制直方图
+    # 绘制分数分布直方图。
     bins = np.linspace(-1, 1, 50)
     plt.hist(target_scores, bins=bins, alpha=0.7, label='Target', color='green')
     plt.hist(non_target_scores, bins=bins, alpha=0.7, label='Non-target', color='red')
@@ -102,25 +260,25 @@ def plot_score_distribution(target_scores: List[float],
 def plot_embedding_tsne(embeddings: np.ndarray,
                         labels: List[int],
                         title: str = "Embedding t-SNE",
-                        save_path: Optional[str] = None):
+                        save_path: Optional[str] = None) -> None:
     """
-    使用t-SNE可视化声纹嵌入向量
+    使用 t-SNE 将嵌入向量可视化到二维平面。
     
     Args:
-        embeddings: 嵌入向量矩阵 [N, dim]
-        labels: 说话人标签
-        title: 图表标题
-        save_path: 保存路径（可选）
+        embeddings: 形状为 `[N, dim]` 的嵌入向量矩阵。
+        labels: 用于区分散点颜色的说话人标签。
+        title: 图表标题。
+        save_path: 可选的保存路径。
     """
     from sklearn.manifold import TSNE
     
-    # t-SNE降维
+    # 使用 t-SNE 进行二维降维。
     tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(embeddings) - 1))
     embeddings_2d = tsne.fit_transform(embeddings)
     
     plt.figure(figsize=(10, 8))
     
-    # 绘制散点图
+    # 按说话人标签绘制散点图。
     unique_labels = np.unique(labels)
     colors = plt.cm.rainbow(np.linspace(0, 1, len(unique_labels)))
     
@@ -144,163 +302,228 @@ def plot_embedding_tsne(embeddings: np.ndarray,
 
 def plot_epoch_metrics(metrics: Dict[str, float],
                        epoch: int,
-                       save_path: Optional[str] = None):
+                       save_path: Optional[str] = None) -> None:
     """
-    绘制单轮训练指标的柱状图
+    绘制单轮训练结果摘要图，并将损失与性能指标分面展示。
     
     Args:
-        metrics: 包含各项指标的字典，如 {'loss': 0.5, 'accuracy': 0.85, 'f1': 0.82, 'eer': 0.12}
-        epoch: 当前轮次
-        save_path: 保存路径（可选）
+        metrics: 单轮训练指标字典。
+        epoch: 当前轮次，从 1 开始计数。
+        save_path: 可选的保存路径。
     """
-    plt.figure(figsize=(12, 6))
-    
-    # 分离不同类型的指标
     loss_metrics = {k: v for k, v in metrics.items() if 'loss' in k.lower()}
-    rate_metrics = {k: v for k, v in metrics.items() if k.lower() not in ['loss'] and 'loss' not in k.lower()}
-    
-    # 创建子图
+    non_loss_metrics = {k: v for k, v in metrics.items() if 'loss' not in k.lower()}
+
+    panels = []
     if loss_metrics:
-        plt.subplot(1, 2, 1)
-        bars = plt.bar(loss_metrics.keys(), loss_metrics.values(), color=['#ff6b6b', '#ffa502'][:len(loss_metrics)])
-        plt.ylabel('Loss Value', fontsize=12)
-        plt.title(f'Epoch {epoch} - Loss Metrics', fontsize=14)
-        plt.xticks(rotation=45, ha='right')
-        # 在柱子上显示数值
-        for bar, val in zip(bars, loss_metrics.values()):
-            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                    f'{val:.4f}', ha='center', va='bottom', fontsize=10)
-        plt.grid(True, alpha=0.3, axis='y')
-    
-    if rate_metrics:
-        plt.subplot(1, 2, 2)
-        colors = ['#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7', '#dfe6e9'][:len(rate_metrics)]
-        bars = plt.bar(rate_metrics.keys(), rate_metrics.values(), color=colors)
-        plt.ylabel('Value', fontsize=12)
-        plt.title(f'Epoch {epoch} - Performance Metrics', fontsize=14)
-        plt.xticks(rotation=45, ha='right')
-        # 在柱子上显示数值
-        for bar, val in zip(bars, rate_metrics.values()):
-            plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                    f'{val:.4f}', ha='center', va='bottom', fontsize=10)
-        # 设置y轴范围0-1（针对比率指标）
-        if all(0 <= v <= 1 for v in rate_metrics.values()):
-            plt.ylim(0, 1.1)
-        plt.grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
+        panels.append(('loss', loss_metrics))
+    if non_loss_metrics:
+        panels.append(('score', non_loss_metrics))
+
+    if not panels:
+        return
+
+    width_ratios = [1.0 if panel_name == 'loss' else 1.45 for panel_name, _ in panels]
+    fig, axes = plt.subplots(
+        1,
+        len(panels),
+        figsize=(12.5, 5.2),
+        gridspec_kw={'width_ratios': width_ratios},
+    )
+    if len(panels) == 1:
+        axes = [axes]
+
+    fig.patch.set_facecolor('white')
+    fig.suptitle(f'Epoch {epoch} Training Snapshot', fontsize=16, fontweight='bold', y=0.98)
+
+    for ax, (panel_name, panel_metrics) in zip(axes, panels):
+        labels = [_format_metric_name(name) for name in panel_metrics.keys()]
+        values = list(panel_metrics.values())
+        y_pos = np.arange(len(labels))
+
+        if panel_name == 'loss':
+            colors = [_series_style(name)['color'] for name in panel_metrics.keys()]
+            ax.hlines(y_pos, 0, values, color=colors, linewidth=2.5, alpha=0.85)
+            ax.scatter(values, y_pos, s=110, color=colors, edgecolors='white', linewidths=1.4, zorder=3)
+            max_value = max(values) if values else 1.0
+            ax.set_xlim(0, max_value * 1.22 if max_value > 0 else 1.0)
+            ax.set_xlabel('Loss Value', fontsize=11)
+            ax.set_title('Loss Metrics', fontsize=13, fontweight='bold')
+            for x_value, y_value in zip(values, y_pos):
+                ax.text(x_value + max(ax.get_xlim()[1] * 0.02, 0.01), y_value, f'{x_value:.4f}',
+                        va='center', ha='left', fontsize=10, color='#2F3B4A')
+        else:
+            order = np.argsort(values)[::-1]
+            sorted_values = [values[idx] for idx in order]
+            sorted_labels = [labels[idx] for idx in order]
+            sorted_metric_names = [list(panel_metrics.keys())[idx] for idx in order]
+            y_pos = np.arange(len(sorted_labels))
+            colors = [_series_style(name)['color'] for name in sorted_metric_names]
+
+            bars = ax.barh(y_pos, sorted_values, color=colors, edgecolor='none', alpha=0.9, height=0.62)
+            if all(0.0 <= value <= 1.0 for value in sorted_values):
+                ax.set_xlim(0, 1.0)
+                ax.set_xlabel('Metric Value', fontsize=11)
+                ax.set_xticks(np.linspace(0, 1.0, 6))
+            else:
+                max_value = max(sorted_values) if sorted_values else 1.0
+                ax.set_xlim(0, max_value * 1.12 if max_value > 0 else 1.0)
+                ax.set_xlabel('Metric Value', fontsize=11)
+
+            ax.set_title('Performance Metrics', fontsize=13, fontweight='bold')
+            ax.invert_yaxis()
+            _annotate_bar_values(ax, bars)
+
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels if panel_name == 'loss' else sorted_labels, fontsize=10)
+        _style_axis(ax)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
         print(f"Epoch {epoch} 指标图已保存至: {save_path}")
     
-    plt.close()
+    plt.close(fig)
 
 
 def plot_training_trends(history: Dict[str, List[float]],
-                         save_path: Optional[str] = None):
+                         save_path: Optional[str] = None) -> None:
     """
-    绘制训练过程的总体趋势图
+    按指标类别绘制训练过程中的整体趋势图。
     
     Args:
-        history: 包含各轮指标历史记录的字典
-                 如 {'loss': [0.8, 0.6, ...], 'accuracy': [0.6, 0.7, ...], ...}
-        save_path: 保存路径（可选）
+        history: 按指标名称组织的历史序列。
+        save_path: 可选的保存路径。
     """
     if not history or not any(history.values()):
         print("警告: 没有训练历史数据可供绘制")
         return
-    
+
+    metric_order = list(history.keys())
     epochs = list(range(1, len(next(iter(history.values()))) + 1))
-    
-    # 计算需要多少个子图
-    n_metrics = len(history)
-    n_cols = min(3, n_metrics)
-    n_rows = (n_metrics + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
-    if n_metrics == 1:
-        axes = np.array([axes])
-    axes = axes.flatten()
-    
-    # 为不同指标定义颜色和样式
-    colors = {
-        'loss': '#ff6b6b',
-        'val_loss': '#ffa502',
-        'accuracy': '#4ecdc4',
-        'val_accuracy': '#45b7d1',
-        'f1': '#96ceb4',
-        'val_f1': '#ffeaa7',
-        'eer': '#e17055',
-        'val_eer': '#fdcb6e',
-        'min_dcf': '#a29bfe',
-        'val_min_dcf': '#6c5ce7',
-        'precision': '#00b894',
-        'recall': '#00cec9'
+
+    grouped_metrics = {
+        'loss': [name for name in metric_order if _metric_family(name) == 'loss'],
+        'score': [name for name in metric_order if _metric_family(name) == 'score'],
+        'error': [name for name in metric_order if _metric_family(name) == 'error'],
     }
-    
-    for idx, (metric_name, values) in enumerate(history.items()):
-        ax = axes[idx]
-        color = colors.get(metric_name, '#74b9ff')
-        
-        ax.plot(epochs, values, marker='o', linewidth=2, markersize=6, 
-                color=color, label=metric_name)
-        ax.set_xlabel('Epoch', fontsize=11)
-        ax.set_ylabel(metric_name.replace('_', ' ').title(), fontsize=11)
-        ax.set_title(f'{metric_name.replace("_", " ").title()} Trend', fontsize=13)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc='best')
-        
-        # 设置x轴为整数刻度
-        ax.set_xticks(epochs)
-        
-        # 标注最小/最大值
-        if values:
-            if 'loss' in metric_name.lower() or 'eer' in metric_name.lower() or 'dcf' in metric_name.lower():
-                # 这些指标越小越好
-                best_idx = np.argmin(values)
-                best_val = values[best_idx]
-                ax.scatter([epochs[best_idx]], [best_val], color='red', s=100, zorder=5)
-                ax.annotate(f'Best: {best_val:.4f}', 
-                           xy=(epochs[best_idx], best_val),
-                           xytext=(5, 10), textcoords='offset points',
-                           fontsize=9, color='red')
+
+    panel_specs = []
+    if grouped_metrics['loss']:
+        panel_specs.append(('Loss Dynamics', 'Loss Value', grouped_metrics['loss']))
+    if grouped_metrics['score']:
+        panel_specs.append(('Performance Dynamics', 'Metric Value', grouped_metrics['score']))
+    if grouped_metrics['error']:
+        panel_specs.append(('Error-Rate Dynamics', 'Error Value', grouped_metrics['error']))
+
+    if not panel_specs:
+        return
+
+    fig, axes = plt.subplots(
+        len(panel_specs),
+        1,
+        figsize=(11.5, 3.6 * len(panel_specs)),
+        sharex=True,
+    )
+    if len(panel_specs) == 1:
+        axes = [axes]
+
+    fig.patch.set_facecolor('white')
+    fig.suptitle('Training Dynamics', fontsize=17, fontweight='bold', y=0.985)
+
+    max_epoch = epochs[-1]
+    extra_space = max(1, int(np.ceil(max_epoch * 0.12)))
+    label_x = max_epoch + extra_space * 0.22
+    x_ticks = epochs if len(epochs) <= 12 else np.unique(np.linspace(1, max_epoch, 8, dtype=int))
+
+    for ax, (panel_title, y_label, metric_names) in zip(axes, panel_specs):
+        label_specs = []
+        for metric_name in metric_names:
+            values = history.get(metric_name, [])
+            if not values:
+                continue
+
+            style = _series_style(metric_name)
+            display_name = _format_metric_name(metric_name)
+            marker_step = max(1, len(epochs) // 8)
+
+            ax.plot(
+                epochs,
+                values,
+                color=style['color'],
+                linestyle=style['linestyle'],
+                linewidth=2.4,
+                solid_capstyle='round',
+            )
+            ax.plot(
+                epochs[::marker_step],
+                values[::marker_step],
+                linestyle='None',
+                marker='o',
+                markersize=3.8,
+                color=style['color'],
+                alpha=0.75,
+            )
+
+            if _metric_family(metric_name) in {'loss', 'error'}:
+                best_idx = int(np.argmin(values))
             else:
-                # 这些指标越大越好
-                best_idx = np.argmax(values)
-                best_val = values[best_idx]
-                ax.scatter([epochs[best_idx]], [best_val], color='green', s=100, zorder=5)
-                ax.annotate(f'Best: {best_val:.4f}', 
-                           xy=(epochs[best_idx], best_val),
-                           xytext=(5, 10), textcoords='offset points',
-                           fontsize=9, color='green')
-    
-    # 隐藏多余的子图
-    for idx in range(len(history), len(axes)):
-        axes[idx].set_visible(False)
-    
-    plt.suptitle('Training Metrics Trends', fontsize=16, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+                best_idx = int(np.argmax(values))
+
+            ax.scatter(
+                epochs[best_idx],
+                values[best_idx],
+                s=42,
+                facecolors='white',
+                edgecolors=style['color'],
+                linewidths=1.6,
+                zorder=4,
+            )
+
+            label_specs.append({
+                'label': display_name,
+                'x': epochs[-1],
+                'y': values[-1],
+                'color': style['color'],
+            })
+
+        if all(
+            all(0.0 <= value <= 1.0 for value in history.get(metric_name, []))
+            for metric_name in metric_names
+            if history.get(metric_name)
+        ):
+            ax.set_ylim(0, 1.02)
+
+        ax.set_title(panel_title, fontsize=13, fontweight='bold', loc='left')
+        ax.set_ylabel(y_label, fontsize=11)
+        ax.set_xlim(1, max_epoch + extra_space)
+        ax.set_xticks(x_ticks)
+        _style_axis(ax)
+        _place_inline_labels(ax, label_specs, label_x)
+
+    axes[-1].set_xlabel('Epoch', fontsize=11)
+    plt.tight_layout(rect=[0, 0, 0.94, 0.965])
     
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
         print(f"训练趋势图已保存至: {save_path}")
     
-    plt.close()
+    plt.close(fig)
 
 
 def plot_pretrain_comparison(pretrain_metrics: Dict[str, float],
                              finetuned_metrics: Dict[str, float],
-                             save_path: Optional[str] = None):
+                             save_path: Optional[str] = None) -> None:
     """
-    绘制预训练模型与微调后模型的性能对比图
+    使用分组柱状图对比预训练模型与微调模型的指标。
     
     Args:
-        pretrain_metrics: 预训练模型的指标
-        finetuned_metrics: 微调后模型的指标
-        save_path: 保存路径（可选）
+        pretrain_metrics: 预训练模型的指标字典。
+        finetuned_metrics: 微调后模型的指标字典。
+        save_path: 可选的保存路径。
     """
     # 找出两者共有的指标
     common_metrics = sorted(set(pretrain_metrics.keys()) & set(finetuned_metrics.keys()))
@@ -371,21 +594,18 @@ def plot_pretrain_comparison(pretrain_metrics: Dict[str, float],
 def compute_classification_metrics(predictions: List[int], 
                                    labels: List[int]) -> Dict[str, float]:
     """
-    计算分类指标
+    根据预测结果与真实标签计算分类指标。
     
     Args:
-        predictions: 预测标签
-        labels: 真实标签
-        
-    Returns:
-        包含accuracy, precision, recall, f1的字典
+        predictions: 预测类别编号。
+        labels: 真实类别编号。
     """
     predictions = np.array(predictions)
     labels = np.array(labels)
     
     accuracy = np.mean(predictions == labels)
     
-    # 使用macro平均处理多分类
+    # 多分类任务下采用宏平均，避免样本量较大的类别占据过高权重。
     precision = precision_score(labels, predictions, average='macro', zero_division=0)
     recall = recall_score(labels, predictions, average='macro', zero_division=0)
     f1 = f1_score(labels, predictions, average='macro', zero_division=0)

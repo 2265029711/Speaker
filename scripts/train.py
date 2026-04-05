@@ -12,46 +12,55 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+from collections import defaultdict
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
-import yaml
 from tqdm import tqdm
 from speechbrain.inference.speaker import SpeakerRecognition
-from speechbrain.dataio.dataset import DynamicItemDataset
-from speechbrain.dataio.dataloader import SaveableDataLoader
-from speechbrain.dataio.batch import PaddedBatch
-from speechbrain.utils.data_utils import undo_padding
 
-from utils.audio_processor import AudioChecker, load_config
+from utils.audio_processor import load_config
 from utils.visualization import (
     plot_epoch_metrics, 
     plot_training_trends, 
-    plot_pretrain_comparison,
     compute_classification_metrics
 )
-from utils.scorer import compute_eer, compute_min_dcf, cosine_similarity
-from utils.losses import get_loss_function, AAMSoftmax
+from utils.scorer import compute_eer, compute_min_dcf
+from utils.losses import get_loss_function
+
+
+SpeakerSample = Dict[str, Any]
+SpeakerBatch = Dict[str, Any]
 
 
 class EarlyStopping:
-    """早停机制：支持混合指标监控，准确率优先策略"""
-    
-    def __init__(self, patience=5, min_delta=0.001, monitor='val_eer', mode='min',
-                 use_hybrid=False, accuracy_weight=0.7, eer_weight=0.3,
-                 accuracy_threshold=0.90):
+    """早停控制器，支持单指标模式和准确率优先的混合评分模式。"""
+
+    def __init__(
+        self,
+        patience: int = 5,
+        min_delta: float = 0.001,
+        monitor: str = 'val_eer',
+        mode: str = 'min',
+        use_hybrid: bool = False,
+        accuracy_weight: float = 0.7,
+        eer_weight: float = 0.3,
+        accuracy_threshold: float = 0.90,
+    ) -> None:
         """
         Args:
-            patience: 容忍轮数
-            min_delta: 最小改善幅度
-            monitor: 监控指标名称（单指标模式）
-            mode: 'min' 指标越小越好，'max' 指标越大越好
-            use_hybrid: 是否使用混合指标模式
-            accuracy_weight: 准确率权重（混合模式）
-            eer_weight: EER权重（混合模式）
-            accuracy_threshold: 准确率阈值，低于此值时优先提升准确率
+            patience: 连续多少个轮次无改进后触发早停。
+            min_delta: 认定为“有改进”所需的最小提升幅度。
+            monitor: 单指标模式下监控的指标名称。
+            mode: 单指标模式的优化方向，`min` 表示越小越好，`max` 表示越大越好。
+            use_hybrid: 是否启用准确率优先的混合评分策略。
+            accuracy_weight: 混合模式中准确率的权重。
+            eer_weight: 混合模式中 EER 的权重。
+            accuracy_threshold: 准确率达到该阈值前，优先只看准确率是否提升。
         """
         self.patience = patience
         self.min_delta = min_delta
@@ -69,30 +78,22 @@ class EarlyStopping:
         self.early_stop = False
         self.best_epoch = 0
         
-    def _compute_hybrid_score(self, accuracy, eer):
-        """计算混合得分：准确率优先策略"""
-        # 准确率越高越好，EER越低越好
-        # 综合得分 = accuracy_weight * accuracy - eer_weight * eer
+    def _compute_hybrid_score(self, accuracy: float, eer: float) -> float:
+        """计算混合模式下的评分。"""
         return self.accuracy_weight * accuracy - self.eer_weight * eer
     
-    def __call__(self, metrics, current_epoch):
+    def __call__(self, metrics: Mapping[str, float], current_epoch: int) -> bool:
         """
-        检查是否应该早停
+        根据当前轮次指标判断是否应触发早停。
         
         Args:
-            metrics: 字典，包含 'accuracy' 和 'eer'
-                     - accuracy: 训练或验证准确率
-                     - eer: 验证EER
-            current_epoch: 当前轮数
-            
-        Returns:
-            bool: True 表示应该停止训练
+            metrics: 当前轮次的指标字典。混合模式下至少包含 `accuracy` 和 `eer`。
+            current_epoch: 当前轮次，从 1 开始计数。
         """
         accuracy = metrics.get('accuracy', 0.0)
         eer = metrics.get('eer', 1.0)
         
         if self.use_hybrid:
-            # 混合指标模式：准确率优先
             current_score = self._compute_hybrid_score(accuracy, eer)
             
             if self.best_score is None:
@@ -102,14 +103,9 @@ class EarlyStopping:
                 self.best_epoch = current_epoch
                 return False
             
-            # 准确率优先策略：
-            # 1. 如果准确率低于阈值，优先提升准确率
-            # 2. 如果准确率高于阈值，综合考虑准确率和EER
-            
             accuracy_improved = accuracy > self.best_accuracy + self.min_delta
-            eer_improved = eer < self.best_eer - self.min_delta
             
-            # 准确率低于阈值时，只要准确率有提升就不计数
+            # 在准确率未达到阈值前，只要准确率继续提升就重置计数器。
             if accuracy < self.accuracy_threshold:
                 if accuracy_improved:
                     self.counter = 0
@@ -120,7 +116,7 @@ class EarlyStopping:
                     print(f"  混合指标更新: accuracy={accuracy:.4f}↑, eer={eer:.4f}, score={current_score:.4f}")
                     return False
             else:
-                # 准确率达到阈值后，使用综合评分
+                # 达到阈值后，再使用混合评分决定是否视为改进。
                 if current_score > self.best_score + self.min_delta * 0.1:
                     self.counter = 0
                     self.best_score = current_score
@@ -130,7 +126,6 @@ class EarlyStopping:
                     print(f"  混合指标更新: accuracy={accuracy:.4f}, eer={eer:.4f}, score={current_score:.4f}↑")
                     return False
             
-            # 没有改善
             self.counter += 1
             print(f"  早停计数: {self.counter}/{self.patience} "
                   f"(最佳 accuracy={self.best_accuracy:.4f}, eer={self.best_eer:.4f}, "
@@ -144,7 +139,6 @@ class EarlyStopping:
             
             return False
         else:
-            # 单指标模式（兼容原有逻辑）
             current_value = metrics.get(self.monitor.replace('val_', ''), 0.0)
             
             if self.best_score is None:
@@ -174,33 +168,30 @@ class EarlyStopping:
 
 
 class SpeakerDataset(Dataset):
-    """说话人数据集"""
+    """从 CSV 加载音频路径与说话人标签，并返回训练所需张量。"""
     
-    def __init__(self, csv_path: str, audio_dir: str, sample_rate: int = 16000):
+    def __init__(self, csv_path: str, audio_dir: str, sample_rate: int = 16000) -> None:
         self.df = pd.read_csv(csv_path)
         self.audio_dir = audio_dir
         self.sample_rate = sample_rate
         self.speaker_ids = sorted(self.df['speaker_id'].unique())
         self.speaker_to_idx = {sid: idx for idx, sid in enumerate(self.speaker_ids)}
         
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.df)
     
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> SpeakerSample:
         row = self.df.iloc[idx]
         speaker_id = row['speaker_id']
         audio_path = os.path.join(self.audio_dir, row['audio_path'])
         
-        # 加载音频
         import torchaudio
         waveform, sr = torchaudio.load(audio_path)
         
-        # 重采样
         if sr != self.sample_rate:
             resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
             waveform = resampler(waveform)
         
-        # 转为单声道
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
         
@@ -212,14 +203,13 @@ class SpeakerDataset(Dataset):
         }
 
 
-def collate_fn(batch):
-    """自定义批处理函数"""
+def collate_fn(batch: Sequence[SpeakerSample]) -> SpeakerBatch:
+    """将批次内变长音频补齐到统一长度。"""
     waveforms = [item['waveform'] for item in batch]
     speaker_ids = torch.stack([item['speaker_id'] for item in batch])
     audio_paths = [item['audio_path'] for item in batch]
     speaker_id_strs = [item['speaker_id_str'] for item in batch]
     
-    # 填充到相同长度
     max_len = max(w.shape[0] for w in waveforms)
     padded_waveforms = torch.zeros(len(batch), max_len)
     for i, w in enumerate(waveforms):
@@ -233,18 +223,21 @@ def collate_fn(batch):
     }
 
 
-def evaluate_model(verification, classifier, dataloader, device, idx_to_speaker):
+def evaluate_model(
+    verification: SpeakerRecognition,
+    classifier: nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    _idx_to_speaker: Mapping[int, str],
+) -> Dict[str, float]:
     """
-    评估模型性能（说话人验证方式）
-    
-    使用嵌入向量相似度进行说话人验证评估，而不是分类任务。
-    主要指标：EER（等错误率）、minDCF（最小检测代价函数）
-    
-    Returns:
-        dict: 包含eer, min_dcf等指标
+    基于嵌入向量相似度评估说话人验证性能。
+
+    该函数不依赖分类器输出，而是通过嵌入向量之间的相似度计算验证任务指标，
+    返回 EER、EER 阈值和 minDCF 等面向验证场景的结果。
     """
     classifier.eval()
-    verification.eval()  # 确保评估模式
+    verification.eval()
     
     all_embeddings = []
     all_speaker_ids = []
@@ -253,21 +246,18 @@ def evaluate_model(verification, classifier, dataloader, device, idx_to_speaker)
         for batch in tqdm(dataloader, desc="提取嵌入向量"):
             waveforms = batch['waveform'].to(device)
             
-            # 提取嵌入向量
             wav_lens = torch.ones(waveforms.size(0), device=device)
             embeddings = verification.encode_batch(waveforms, wav_lens).squeeze(1)
             
             all_embeddings.append(embeddings.cpu())
             all_speaker_ids.extend(batch['speaker_id_str'])
     
-    # 合并所有嵌入向量
     all_embeddings = torch.cat(all_embeddings, dim=0)
     
     print(f"\n验证集评估:")
     print(f"  总样本数: {len(all_speaker_ids)}")
     print(f"  说话人数: {len(set(all_speaker_ids))}")
     
-    # 计算说话人验证指标
     eer, eer_threshold, scores, labels = compute_verification_eer(
         all_embeddings, 
         all_speaker_ids
@@ -285,28 +275,16 @@ def evaluate_model(verification, classifier, dataloader, device, idx_to_speaker)
     }
 
 
-def compute_verification_eer(embeddings, speaker_ids, max_pairs=5000):
-    """
-    计算验证任务上的EER（使用分层平衡采样）
-    
-    改进：确保正负样本平衡，每个说话人都有代表性
-    
-    Args:
-        embeddings: 所有音频的嵌入向量 (N, D)
-        speaker_ids: 对应的说话人ID列表 (N,)
-        max_pairs: 最大采样对数，避免计算量过大
-        
-    Returns:
-        (eer, threshold, scores, labels)
-    """
-    import numpy as np
-    from collections import defaultdict
-    
+def compute_verification_eer(
+    embeddings: torch.Tensor | np.ndarray,
+    speaker_ids: Sequence[str],
+    max_pairs: int = 5000,
+) -> Tuple[float, float, List[float], List[int]]:
+    """通过分层平衡采样的验证对估计 EER。"""
     embeddings = embeddings.numpy() if torch.is_tensor(embeddings) else embeddings
     n = len(speaker_ids)
     
-    # 按说话人分组索引
-    speaker_to_indices = defaultdict(list)
+    speaker_to_indices: Dict[str, List[int]] = defaultdict(list)
     for idx, spk in enumerate(speaker_ids):
         speaker_to_indices[spk].append(idx)
     
@@ -315,25 +293,20 @@ def compute_verification_eer(embeddings, speaker_ids, max_pairs=5000):
     
     print(f"  验证集样本数: {n}, 说话人数: {num_speakers}")
     
-    # 生成正样本对（同一说话人）和负样本对（不同说话人）
-    positive_pairs = []
-    negative_pairs = []
+    positive_pairs: List[Tuple[int, int]] = []
+    negative_pairs: List[Tuple[int, int]] = []
     
-    # 正样本对：每个说话人内部的组合
     for spk, indices in speaker_to_indices.items():
         for i in range(len(indices)):
             for j in range(i + 1, len(indices)):
                 positive_pairs.append((indices[i], indices[j]))
     
-    # 负样本对：不同说话人之间的组合
     for i in range(num_speakers):
         for j in range(i + 1, num_speakers):
             spk_i = unique_speakers[i]
             spk_j = unique_speakers[j]
-            # 每对说话人之间采样若干对
             indices_i = speaker_to_indices[spk_i]
             indices_j = speaker_to_indices[spk_j]
-            # 每对说话人最多采样 min(3, len_i * len_j) 对
             max_per_pair = min(3, len(indices_i) * len(indices_j))
             for _ in range(max_per_pair):
                 idx_i = np.random.choice(indices_i)
@@ -345,7 +318,6 @@ def compute_verification_eer(embeddings, speaker_ids, max_pairs=5000):
     
     print(f"  正样本对总数: {total_positive}, 负样本对总数: {total_negative}")
     
-    # 平衡采样：正负样本各采样 max_pairs // 2
     np.random.seed(42)  # 保证可复现
     half_pairs = max_pairs // 2
     
@@ -364,8 +336,7 @@ def compute_verification_eer(embeddings, speaker_ids, max_pairs=5000):
     
     print(f"  采样后 - 正样本对: {len(sampled_positive)}, 负样本对: {len(sampled_negative)}")
     
-    # 批量计算余弦相似度
-    scores = []
+    scores: List[float] = []
     for i, j in pairs:
         e1 = embeddings[i] / (np.linalg.norm(embeddings[i]) + 1e-8)
         e2 = embeddings[j] / (np.linalg.norm(embeddings[j]) + 1e-8)
@@ -380,16 +351,13 @@ def compute_verification_eer(embeddings, speaker_ids, max_pairs=5000):
     return eer, threshold, scores, labels
 
 
-def evaluate_pretrained_model(verification, dataloader, device):
-    """
-    评估预训练模型性能（不使用分类器）
-    
-    使用嵌入向量相似度进行说话人验证评估。
-    
-    Returns:
-        dict: 预训练模型在验证集上的指标
-    """
-    verification.eval()  # 确保评估模式
+def evaluate_pretrained_model(
+    verification: SpeakerRecognition,
+    dataloader: DataLoader,
+    device: torch.device,
+) -> Dict[str, float]:
+    """在不使用分类器头的情况下评估预训练骨干网络。"""
+    verification.eval()
     
     all_embeddings = []
     all_speaker_ids = []
@@ -410,7 +378,6 @@ def evaluate_pretrained_model(verification, dataloader, device):
     print(f"  总样本数: {len(all_speaker_ids)}")
     print(f"  说话人数: {len(set(all_speaker_ids))}")
     
-    # 计算EER
     eer, threshold, scores, labels = compute_verification_eer(
         all_embeddings,
         all_speaker_ids
@@ -426,15 +393,15 @@ def evaluate_pretrained_model(verification, dataloader, device):
     }
 
 
-def get_state_dict(model):
-    """获取模型的state_dict，兼容DataParallel包装"""
+def get_state_dict(model: nn.Module) -> Mapping[str, torch.Tensor]:
+    """获取兼容 `DataParallel` 包装的 `state_dict`。"""
     if isinstance(model, nn.DataParallel):
         return model.module.state_dict()
     return model.state_dict()
 
 
-def train(config_path: str = "config/config.yaml"):
-    """训练主函数"""
+def train(config_path: str = "config/config.yaml") -> Tuple[nn.Module, Mapping[str, int], Dict[str, List[float]]]:
+    """执行训练流程，并保存检查点、指标及可视化结果。"""
     
     # 加载配置
     config = load_config(config_path)
@@ -444,14 +411,14 @@ def train(config_path: str = "config/config.yaml"):
     audio_cfg = config['audio']
     output_cfg = config['output']
     
-    # 多卡训练检测与初始化
+    # 检测运行设备，并根据 GPU 数量决定是否启用多卡训练。
     if torch.cuda.is_available():
         num_gpus = torch.cuda.device_count()
         if num_gpus > 1:
             print(f"检测到 {num_gpus} 张GPU，启用多卡训练")
             device = torch.device("cuda")
             use_multi_gpu = True
-            # 打印GPU信息
+            # 打印每张 GPU 的名称与显存，便于确认训练环境。
             for i in range(num_gpus):
                 gpu_name = torch.cuda.get_device_name(i)
                 gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3
@@ -479,22 +446,21 @@ def train(config_path: str = "config/config.yaml"):
     local_hparams = os.path.join(pretrained_path, "hyperparams.yaml")
     
     if os.path.exists(local_hparams):
-        # 使用本地模型 - 直接使用 SpeakerRecognition 加载本地路径
-        # SpeechBrain 支持本地目录作为 source
+        # 使用本地预训练模型目录直接初始化 SpeakerRecognition。
         verification = SpeakerRecognition.from_hparams(
             source=pretrained_path,
             run_opts={"device": device}
         )
         print("本地预训练模型加载完成")
     else:
-        # 使用HuggingFace模型
+        # 否则按远程模型源方式加载预训练模型。
         verification = SpeakerRecognition.from_hparams(
             source=pretrained_path,
             savedir="pretrained_models",
             run_opts={"device": device}
         )
     
-    # 多卡训练：用DataParallel包装embedding_model
+    # 多卡训练时仅对嵌入模型做 DataParallel 包装。
     embedding_model = verification.mods["embedding_model"]
     if use_multi_gpu:
         embedding_model = nn.DataParallel(embedding_model)
@@ -516,19 +482,17 @@ def train(config_path: str = "config/config.yaml"):
         collate_fn=collate_fn
     )
     
-    # 验证数据集已禁用（使用单独的验证脚本评估）
-    valid_loader = None
+    # 验证逻辑统一放在独立评估脚本中，训练脚本仅负责优化与保存检查点。
     print("验证集评估已禁用，请使用 evaluate_model.py 进行验证")
     
     # 获取说话人数量
     num_speakers = len(train_dataset.speaker_ids)
-    idx_to_speaker = {idx: sid for sid, idx in train_dataset.speaker_to_idx.items()}
     print(f"说话人数量: {num_speakers}")
     
-    # 获取损失函数配置
+    # 读取损失函数与微调相关配置。
     loss_type = training_cfg.get('loss_type', 'softmax')
     finetune_backbone = training_cfg.get('finetune_backbone', False)
-    backbone_lr_scale = training_cfg.get('backbone_lr_scale', 0.1)  # backbone 学习率缩放因子
+    backbone_lr_scale = training_cfg.get('backbone_lr_scale', 0.1)  # 骨干网络学习率缩放因子
     aam_s = training_cfg.get('aam_s', 30.0)  # AAM-Softmax 缩放因子
     aam_m = training_cfg.get('aam_m', 0.2)   # AAM-Softmax 角度边界
     dropout = training_cfg.get('dropout', 0.0)  # Dropout 概率
@@ -543,16 +507,16 @@ def train(config_path: str = "config/config.yaml"):
     if loss_type in ['aam_softmax', 'aam', 'subcenter_aam', 'combined']:
         print(f"  AAM-Softmax 参数: s={aam_s}, m={aam_m}")
     
-    # 创建Dropout层（防止过拟合）
+    # 仅在配置中显式启用时，才在嵌入向量后追加 Dropout。
     dropout_layer = nn.Dropout(p=dropout).to(device) if dropout > 0 else None
     
     # 创建损失函数/分类器
     if loss_type == 'softmax':
-        # 普通的线性分类器 + CrossEntropy
+        # 使用线性分类器与交叉熵损失。
         classifier = nn.Linear(model_cfg['embedding_dim'], num_speakers).to(device)
         criterion = nn.CrossEntropyLoss()
     else:
-        # AAM-Softmax 或其他损失函数
+        # 使用 AAM-Softmax 或其他带分类头的损失函数。
         classifier = get_loss_function(
             loss_type=loss_type,
             in_features=model_cfg['embedding_dim'],
@@ -560,17 +524,17 @@ def train(config_path: str = "config/config.yaml"):
             s=aam_s,
             m=aam_m
         ).to(device)
-        criterion = None  # AAM-Softmax 内部包含损失计算
+        criterion = None  # AAM-Softmax 内部已封装损失计算。
     
-    # 注意：分类器不使用 DataParallel 包装
-    # 原因：AAMSoftmax 返回标量 loss，DataParallel 会将其收集为 tensor 导致 backward 失败
-    # 分类器计算量小，在单 GPU 上计算即可
+    # 分类器不使用 DataParallel。
+    # 对于 AAM 一类损失，分类器会直接返回标量 loss，多卡包装后会让反向传播变复杂，
+    # 但收益很小，因此保持单卡更稳妥。
     
-    # 收集需要优化的参数
+    # 组织需要优化的参数组。
     param_groups = []
     
     if finetune_backbone:
-        # 解冻 backbone 参数
+        # 解冻骨干网络参数。
         print("\n解冻 ECAPA-TDNN backbone 参数...")
         backbone_params = []
         total_backbone_params = 0
@@ -589,25 +553,22 @@ def train(config_path: str = "config/config.yaml"):
                 'name': 'backbone'
             })
     
-    # 添加分类器/损失函数参数组
-    if loss_type == 'softmax':
-        classifier_params = classifier.parameters()
-    else:
-        classifier_params = classifier.parameters()
-    
+    # 分类器参数统一使用基础学习率。
+    classifier_params = classifier.parameters()
+
     param_groups.append({
         'params': classifier_params,
         'lr': float(training_cfg['learning_rate']),
         'name': 'classifier'
     })
     
-    # 创建优化器
+    # 创建优化器。
     optimizer = optim.Adam(
         param_groups,
         weight_decay=float(training_cfg['weight_decay'])
     )
     
-    # 打印参数统计
+    # 打印参数规模统计信息。
     total_params = sum(p.numel() for group in param_groups for p in group['params'])
     trainable_params = sum(p.numel() for group in param_groups for p in group['params'] if p.requires_grad)
     print(f"\n模型参数统计:")
@@ -615,14 +576,16 @@ def train(config_path: str = "config/config.yaml"):
     print(f"  可训练参数量: {trainable_params:,}")
     
     
-    # 训练历史记录
+    # 初始化训练历史记录。
     history = {
         'train_loss': [],
         'train_accuracy': [],
-        'train_f1': []
+        'train_f1': [],
+        'train_precision': [],
+        'train_recall': []
     }
     
-    # 初始化早停机制
+    # 根据配置初始化早停机制。
     early_stopping_cfg = training_cfg.get('early_stopping', {})
     early_stopping = None
     if early_stopping_cfg.get('enabled', False):
@@ -645,20 +608,13 @@ def train(config_path: str = "config/config.yaml"):
             print(f"早停已启用: patience={early_stopping_cfg.get('patience', 5)}, "
                   f"monitor={early_stopping_cfg.get('monitor', 'val_eer')}")
     
-    # 训练循环
+    # 进入正式训练循环。
     print("\n=== 开始训练 ===")
-    best_val_f1 = 0
     best_epoch = 0
-    best_val_eer = float('inf')  # 跟踪最佳 EER
     best_hybrid_score = -float('inf')  # 混合指标得分（准确率优先）
     
-    # 获取混合指标权重
-    early_stopping_cfg = training_cfg.get('early_stopping', {})
-    accuracy_weight = float(early_stopping_cfg.get('accuracy_weight', 0.7))
-    eer_weight = float(early_stopping_cfg.get('eer_weight', 0.3))
-    
     for epoch in range(training_cfg['epochs']):
-        # 设置模型模式
+        # 根据是否微调骨干网络设置模型模式。
         if finetune_backbone:
             verification.train()  # 微调 backbone 时需要 train 模式
         else:
@@ -675,48 +631,44 @@ def train(config_path: str = "config/config.yaml"):
             waveforms = batch['waveform'].to(device)
             speaker_ids = batch['speaker_id'].to(device)
             
-            # 提取嵌入向量
             if finetune_backbone:
-                # 微调模式下需要梯度，但 BatchNorm 使用固定统计量（避免多卡单样本问题）
-                # 临时将 embedding_model 设为 eval 模式（BatchNorm 使用固定统计量）
-                # 同时用 enable_grad 确保梯度可以回传
+                # 微调模式下需要梯度，但 BatchNorm 仍固定统计量，以避免小批量和多卡场景下的不稳定。
+                # 临时切换为 eval 模式只影响 BatchNorm/Dropout 行为，不阻断梯度回传。
                 was_training = embedding_model.training
-                embedding_model.eval()  # BatchNorm 使用固定统计量
+                embedding_model.eval()  # 固定 BatchNorm 统计量。
                 with torch.enable_grad():
                     wav_lens = torch.ones(waveforms.size(0), device=device)
                     embeddings = verification.encode_batch(waveforms, wav_lens).squeeze(1)
                 if was_training:
-                    embedding_model.train()  # 恢复 train 模式（Dropout 等）
+                    embedding_model.train()  # 恢复训练模式。
             else:
-                # 冻结模式下不需要梯度
+                # 骨干网络冻结时无需计算梯度。
                 with torch.no_grad():
                     wav_lens = torch.ones(waveforms.size(0), device=device)
                     embeddings = verification.encode_batch(waveforms, wav_lens).squeeze(1)
             
-            # 应用 Dropout（防止过拟合）
+            # 在嵌入层之后可选地施加 Dropout 以抑制过拟合。
             if dropout_layer is not None:
                 embeddings = dropout_layer(embeddings)
             
-            # 计算损失
+            # 前向计算损失与预测结果。
             if loss_type == 'softmax':
-                # 普通分类器
                 logits = classifier(embeddings)
                 loss = criterion(logits, speaker_ids)
             else:
-                # AAM-Softmax 等
                 loss = classifier(embeddings, speaker_ids)
-                # 获取 logits 用于计算准确率
+                # 对于带角度间隔的分类头，额外取回 logits 用于统计训练准确率。
                 if hasattr(classifier, 'get_logits'):
                     logits = classifier.get_logits(embeddings)
                 else:
                     logits = classifier.get_logits(embeddings) if hasattr(classifier, 'get_logits') else None
             
-            # 反向传播
+            # 执行一次标准的反向传播与参数更新。
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
-            # 统计
+            # 更新本轮训练统计量。
             total_loss += loss.item()
             _, predicted = torch.max(logits, 1)
             all_predictions.extend(predicted.cpu().numpy())
@@ -728,14 +680,16 @@ def train(config_path: str = "config/config.yaml"):
                 'acc': f'{current_acc:.4f}'
             })
         
-        # 计算训练指标
+        # 汇总本轮训练指标。
         train_metrics = compute_classification_metrics(all_predictions, all_labels)
         train_metrics['loss'] = total_loss / len(train_loader)
         
-        # 记录训练历史
+        # 将本轮结果写入历史序列，供后续绘图使用。
         history['train_loss'].append(train_metrics['loss'])
         history['train_accuracy'].append(train_metrics['accuracy'])
         history['train_f1'].append(train_metrics['f1'])
+        history['train_precision'].append(train_metrics['precision'])
+        history['train_recall'].append(train_metrics['recall'])
         
         print(f"\nEpoch {epoch + 1} 训练结果:")
         print(f"  Loss: {train_metrics['loss']:.4f}")
@@ -744,11 +698,11 @@ def train(config_path: str = "config/config.yaml"):
         print(f"  Precision: {train_metrics['precision']:.4f}")
         print(f"  Recall: {train_metrics['recall']:.4f}")
         
-        # 保存最佳模型（基于训练准确率）
+        # 若训练准确率刷新历史最佳，则覆盖保存最佳检查点。
         if train_metrics['accuracy'] > best_hybrid_score:
             best_hybrid_score = train_metrics['accuracy']
             best_epoch = epoch + 1
-            # 保存最佳模型检查点
+            # 保存最佳模型检查点。
             best_checkpoint_path = os.path.join(
                 output_cfg['checkpoint_dir'],
                 "classifier_best.pt"
@@ -766,7 +720,7 @@ def train(config_path: str = "config/config.yaml"):
             print(f"最佳模型已保存: {best_checkpoint_path}")
             print(f"  准确率: {best_hybrid_score:.4f}")
         
-        # 每轮保存指标图片
+        # 每轮训练结束后保存一次指标快照图。
         epoch_metrics = {k: v for k, v in train_metrics.items()}
         
         plot_epoch_metrics(
@@ -775,7 +729,7 @@ def train(config_path: str = "config/config.yaml"):
             save_path=os.path.join(metrics_dir, f'epoch_{epoch + 1}_metrics.png')
         )
         
-        # 每5轮保存检查点
+        # 每 5 轮额外落盘一个阶段性检查点。
         if (epoch + 1) % 5 == 0:
             checkpoint_path = os.path.join(
                 output_cfg['checkpoint_dir'],
@@ -792,17 +746,17 @@ def train(config_path: str = "config/config.yaml"):
             }, checkpoint_path)
             print(f"检查点已保存: {checkpoint_path}")
         
-        # 早停检查（基于训练准确率）
+        # 基于当前训练指标执行早停检查。
         if early_stopping:
             hybrid_metrics = {
                 'accuracy': train_metrics['accuracy'],
-                'eer': 0.0  # 无验证EER
+                'eer': 0.0  # 当前训练流程未接入验证 EER，先以 0 占位。
             }
             if early_stopping(hybrid_metrics, epoch + 1):
                 print(f"\n早停触发于 Epoch {epoch + 1}")
                 break
     
-    # 保存最终模型
+    # 训练结束后保存最终模型。
     final_path = os.path.join(output_cfg['checkpoint_dir'], "classifier_final.pt")
     torch.save({
         'classifier_state_dict': get_state_dict(classifier),
@@ -816,13 +770,13 @@ def train(config_path: str = "config/config.yaml"):
     print(f"\n最终模型已保存: {final_path}")
     print(f"最佳模型: Epoch {best_epoch}, 准确率: {best_hybrid_score:.4f}")
     
-    # 保存训练趋势图
+    # 训练结束后统一生成训练趋势图。
     plot_training_trends(
         history,
         save_path=os.path.join(metrics_dir, 'training_trends.png')
     )
     
-    # 打印性能总结
+    # 打印训练完成后的摘要信息。
     print("\n" + "="*50)
     print("=== 训练完成 - 性能总结 ===")
     print("="*50)

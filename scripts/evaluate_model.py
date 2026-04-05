@@ -7,6 +7,8 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -22,34 +24,35 @@ from torch.utils.data import DataLoader, Dataset
 from utils.losses import AAMSoftmax
 
 
+SpeakerSample = Dict[str, Any]
+SpeakerBatch = Dict[str, Any]
+
+
 class SpeakerDataset(Dataset):
-    """说话人数据集"""
+    """从 CSV 加载音频路径与说话人标签，并返回评估所需张量。"""
     
-    def __init__(self, csv_path: str, audio_dir: str, sample_rate: int = 16000):
+    def __init__(self, csv_path: str, audio_dir: str, sample_rate: int = 16000) -> None:
         self.df = pd.read_csv(csv_path)
         self.audio_dir = audio_dir
         self.sample_rate = sample_rate
         self.speaker_ids = sorted(self.df['speaker_id'].unique())
         self.speaker_to_idx = {sid: idx for idx, sid in enumerate(self.speaker_ids)}
         
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.df)
     
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> SpeakerSample:
         row = self.df.iloc[idx]
         speaker_id = row['speaker_id']
         audio_path = os.path.join(self.audio_dir, row['audio_path'])
         
-        # 加载音频
         import torchaudio
         waveform, sr = torchaudio.load(audio_path)
         
-        # 重采样
         if sr != self.sample_rate:
             resampler = torchaudio.transforms.Resample(sr, self.sample_rate)
             waveform = resampler(waveform)
         
-        # 转为单声道
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
         
@@ -61,14 +64,13 @@ class SpeakerDataset(Dataset):
         }
 
 
-def collate_fn(batch):
-    """自定义批处理函数"""
+def collate_fn(batch: Sequence[SpeakerSample]) -> SpeakerBatch:
+    """将批次内变长音频补齐到统一长度。"""
     waveforms = [item['waveform'] for item in batch]
     speaker_ids = torch.stack([item['speaker_id'] for item in batch])
     audio_paths = [item['audio_path'] for item in batch]
     speaker_id_strs = [item['speaker_id_str'] for item in batch]
     
-    # 填充到相同长度
     max_len = max(w.shape[0] for w in waveforms)
     padded_waveforms = torch.zeros(len(batch), max_len)
     for i, w in enumerate(waveforms):
@@ -82,30 +84,23 @@ def collate_fn(batch):
     }
 
 
-def load_config(config_path: str = "config/config.yaml"):
-    """加载配置文件"""
+def load_config(config_path: str = "config/config.yaml") -> Dict[str, Any]:
+    """加载并解析 YAML 配置文件。"""
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
-def compute_det_curve(target_scores, non_target_scores):
-    """
-    计算DET曲线数据点
-    
-    Returns:
-        false_alarm_rates: 误报率
-        miss_rates: 漏报率
-        thresholds: 阈值
-    """
-    # 合并所有分数
+def compute_det_curve(
+    target_scores: Sequence[float],
+    non_target_scores: Sequence[float],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """计算 DET 曲线所需的误报率、漏报率与阈值序列。"""
     scores = np.concatenate([target_scores, non_target_scores])
     labels = np.concatenate([np.ones(len(target_scores)), np.zeros(len(non_target_scores))])
     
-    # 按分数排序
     sorted_indices = np.argsort(scores)[::-1]
     sorted_labels = labels[sorted_indices]
     
-    # 计算累积统计
     n_targets = len(target_scores)
     n_non_targets = len(non_target_scores)
     
@@ -132,11 +127,14 @@ def compute_det_curve(target_scores, non_target_scores):
     return np.array(false_alarm_rates), np.array(miss_rates), np.array(thresholds)
 
 
-def compute_eer(target_scores, non_target_scores):
-    """计算EER及其阈值"""
+def compute_eer(
+    target_scores: Sequence[float],
+    non_target_scores: Sequence[float],
+) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    """计算 EER、对应阈值以及 DET 曲线中间结果。"""
     far, mr, thresholds = compute_det_curve(target_scores, non_target_scores)
     
-    # 找到FAR和MR相等的点
+    # 找到 FAR 与 MR 最接近的点，作为 EER 的近似位置。
     eer_idx = np.argmin(np.abs(far - mr))
     eer = (far[eer_idx] + mr[eer_idx]) / 2
     eer_threshold = thresholds[eer_idx]
@@ -144,9 +142,15 @@ def compute_eer(target_scores, non_target_scores):
     return eer, eer_threshold, far, mr
 
 
-def compute_min_dcf(target_scores, non_target_scores, p_target=0.01, c_miss=1, c_fa=1):
-    """计算最小检测代价函数"""
-    far, mr, thresholds = compute_det_curve(target_scores, non_target_scores)
+def compute_min_dcf(
+    target_scores: Sequence[float],
+    non_target_scores: Sequence[float],
+    p_target: float = 0.01,
+    c_miss: float = 1,
+    c_fa: float = 1,
+) -> float:
+    """计算最小检测代价函数（minDCF）。"""
+    far, mr, _ = compute_det_curve(target_scores, non_target_scores)
     
     # 计算检测代价
     dcf = c_miss * mr * p_target + c_fa * far * (1 - p_target)
@@ -157,18 +161,24 @@ def compute_min_dcf(target_scores, non_target_scores, p_target=0.01, c_miss=1, c
     return min_dcf
 
 
-def compute_roc_curve(target_scores, non_target_scores):
-    """计算ROC曲线"""
+def compute_roc_curve(
+    target_scores: Sequence[float],
+    non_target_scores: Sequence[float],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """根据目标分数和非目标分数计算 ROC 曲线点。"""
     far, mr, _ = compute_det_curve(target_scores, non_target_scores)
     
-    # TPR = 1 - MR
+    # 真阳性率（TPR）等于 `1 - 漏报率`。
     tpr = 1 - mr
     
     return far, tpr
 
 
-def compute_score_distribution(target_scores, non_target_scores):
-    """计算分数分布"""
+def compute_score_distribution(
+    target_scores: Sequence[float],
+    non_target_scores: Sequence[float],
+) -> Dict[str, float]:
+    """返回目标分数与非目标分数的统计摘要。"""
     return {
         'target_mean': np.mean(target_scores),
         'target_std': np.std(target_scores),
@@ -177,46 +187,35 @@ def compute_score_distribution(target_scores, non_target_scores):
     }
 
 
-def evaluate_verification_pairs(verification, pairs_csv, audio_dir, device, threshold=0.5):
-    """
-    评估说话人验证准确率（基于预生成的音频对）
-    
-    Args:
-        verification: SpeakerRecognition 模型
-        pairs_csv: 音频对CSV文件路径 (audio1, audio2, label)
-        audio_dir: 音频文件目录
-        device: 设备
-        threshold: 相似度阈值
-    
-    Returns:
-        dict: 包含准确率、精确率、召回率等指标
-    """
-    # 读取音频对
+def evaluate_verification_pairs(
+    verification: SpeakerRecognition,
+    pairs_csv: str,
+    audio_dir: str,
+    device: torch.device,
+    threshold: float = 0.5,
+) -> Dict[str, Any]:
+    """基于预生成的音频对 CSV 评估说话人验证准确率。"""
     df = pd.read_csv(pairs_csv)
     print(f"\n加载验证对: {len(df)} 对")
     print(f"  正样本 (label=1): {(df['label']==1).sum()} 对")
     print(f"  负样本 (label=0): {(df['label']==0).sum()} 对")
     
-    # 缓存嵌入向量，避免重复计算
-    embedding_cache = {}
+    embedding_cache: Dict[str, torch.Tensor] = {}
     
-    def get_embedding(audio_path):
-        """获取音频嵌入向量（带缓存）"""
+    def get_embedding(audio_path: str) -> torch.Tensor:
+        """获取单个音频文件的嵌入向量，并使用缓存避免重复计算。"""
         if audio_path in embedding_cache:
             return embedding_cache[audio_path]
         
         full_path = os.path.join(audio_dir, audio_path)
         
-        # 加载音频
         import torchaudio
         waveform, sr = torchaudio.load(full_path)
         
-        # 重采样
         if sr != 16000:
             resampler = torchaudio.transforms.Resample(sr, 16000)
             waveform = resampler(waveform)
         
-        # 转为单声道
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
         
@@ -278,7 +277,7 @@ def evaluate_verification_pairs(verification, pairs_csv, audio_dir, device, thre
     pos_scores = scores[labels == 1]
     neg_scores = scores[labels == 0]
     
-    # 计算 EER
+    # 计算基于当前正负样本分数的 EER。
     eer, eer_threshold, _, _ = compute_eer(pos_scores, neg_scores)
     
     # 混淆矩阵
@@ -308,18 +307,206 @@ def evaluate_verification_pairs(verification, pairs_csv, audio_dir, device, thre
     }
 
 
-def evaluate_all_pairs(embeddings_dict, speaker_labels, sample_ratio=1.0):
+def _style_report_axes(ax: Any) -> None:
+    """为评估报告中的坐标轴应用更规范的学术图表样式。"""
+    ax.set_facecolor('white')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_color('#B0B0B0')
+    ax.spines['bottom'].set_color('#B0B0B0')
+    ax.tick_params(colors='#333333')
+
+
+def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: str) -> None:
+    """生成验证对评估报告图，并保存到指定路径。"""
+    scores = pairs_metrics['scores']
+    labels_arr = pairs_metrics['labels']
+    pos_scores = scores[labels_arr == 1]
+    neg_scores = scores[labels_arr == 0]
+
+    cm = np.array([
+        [pairs_metrics['tn'], pairs_metrics['fp']],
+        [pairs_metrics['fn'], pairs_metrics['tp']]
+    ])
+    row_sums = cm.sum(axis=1, keepdims=True)
+    cm_normalized = np.divide(
+        cm,
+        row_sums,
+        out=np.zeros_like(cm, dtype=float),
+        where=row_sums > 0
+    )
+
+    far = pairs_metrics['fp'] / max(pairs_metrics['fp'] + pairs_metrics['tn'], 1)
+    frr = pairs_metrics['fn'] / max(pairs_metrics['fn'] + pairs_metrics['tp'], 1)
+
+    fig = plt.figure(figsize=(13.6, 8.8), facecolor='white')
+    gs = GridSpec(
+        3, 1,
+        figure=fig,
+        height_ratios=[0.12, 1.02, 0.96],
+        hspace=0.42
+    )
+
+    ax_header = fig.add_subplot(gs[0, :])
+    ax_header.axis('off')
+    ax_header.text(
+        0.5,
+        0.78,
+        'Speaker Verification Pair Report',
+        ha='center',
+        va='center',
+        fontsize=20,
+        fontweight='bold',
+        color='#111111'
+    )
+
+    ax_dist = fig.add_subplot(gs[1, 0])
+    _style_report_axes(ax_dist)
+
+    score_min = min(np.min(scores), pairs_metrics['threshold'], pairs_metrics['eer_threshold'])
+    score_max = max(np.max(scores), pairs_metrics['threshold'], pairs_metrics['eer_threshold'])
+    margin = max((score_max - score_min) * 0.08, 0.02)
+    bins = np.linspace(score_min - margin, score_max + margin, 36)
+
+    ax_dist.hist(
+        neg_scores,
+        bins=bins,
+        density=True,
+        alpha=0.38,
+        color='#C44E52',
+        edgecolor='white',
+        linewidth=0.8,
+        label=f'Non-target trials (n={len(neg_scores)})'
+    )
+    ax_dist.hist(
+        pos_scores,
+        bins=bins,
+        density=True,
+        alpha=0.45,
+        color='#4C72B0',
+        edgecolor='white',
+        linewidth=0.8,
+        label=f'Target trials (n={len(pos_scores)})'
+    )
+    ax_dist.axvline(
+        pairs_metrics['threshold'],
+        color='#1F1F1F',
+        linestyle='--',
+        linewidth=1.3,
+        alpha=0.9,
+        ymin=0.0,
+        ymax=0.88,
+        label=f'Operating threshold = {pairs_metrics["threshold"]:.4f}'
+    )
+    ax_dist.set_title('Verification Score Distribution', fontsize=14, fontweight='bold', pad=34)
+    ax_dist.set_xlabel('Cosine similarity score', fontsize=11, labelpad=2)
+    ax_dist.set_ylabel('Density', fontsize=11)
+    ax_dist.grid(True, axis='y', linestyle='--', linewidth=0.6, alpha=0.25)
+    ax_dist.legend(
+        loc='upper center',
+        bbox_to_anchor=(0.5, 1.01),
+        ncol=2,
+        frameon=False,
+        fontsize=10,
+        columnspacing=1.8,
+        handlelength=2.2,
+        borderaxespad=0.0
+    )
+
+    bottom_gs = gs[2, 0].subgridspec(1, 2, width_ratios=[1.0, 1.0], wspace=0.22)
+
+    ax_cm = fig.add_subplot(bottom_gs[0, 0])
+    _style_report_axes(ax_cm)
+    im = ax_cm.imshow(cm_normalized, cmap='Blues', vmin=0.0, vmax=1.0)
+    ax_cm.set_title('Confusion Matrix (row-normalized)', fontsize=13, fontweight='bold', pad=6)
+    ax_cm.set_xlabel('Predicted label', fontsize=11)
+    ax_cm.set_ylabel('True label', fontsize=11)
+    ax_cm.set_xticks([0, 1])
+    ax_cm.set_yticks([0, 1])
+    ax_cm.set_xticklabels(['Different speaker', 'Same speaker'])
+    ax_cm.set_yticklabels(['Different speaker', 'Same speaker'])
+    ax_cm.set_xticks(np.arange(-0.5, 2, 1), minor=True)
+    ax_cm.set_yticks(np.arange(-0.5, 2, 1), minor=True)
+    ax_cm.grid(which='minor', color='white', linestyle='-', linewidth=2)
+    ax_cm.tick_params(which='minor', bottom=False, left=False)
+
+    for i in range(2):
+        for j in range(2):
+            rate = cm_normalized[i, j] * 100
+            text_color = 'white' if cm_normalized[i, j] >= 0.55 else '#1F1F1F'
+            ax_cm.text(
+                j,
+                i,
+                f'{cm[i, j]}\n{rate:.1f}%',
+                ha='center',
+                va='center',
+                fontsize=12,
+                fontweight='bold',
+                color=text_color
+            )
+
+    cbar = fig.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
+    cbar.set_label('Row proportion', fontsize=10)
+    cbar.ax.tick_params(labelsize=9)
+
+    ax_table = fig.add_subplot(bottom_gs[0, 1])
+    ax_table.axis('off')
+    ax_table.set_title('Evaluation Summary', fontsize=13, fontweight='bold', pad=10)
+
+    summary_rows = [
+        ['Operating threshold', f"{pairs_metrics['threshold']:.4f}"],
+        ['EER threshold', f"{pairs_metrics['eer_threshold']:.4f}"],
+        ['Accuracy', f"{pairs_metrics['accuracy'] * 100:.2f}%"],
+        ['Precision', f"{pairs_metrics['precision'] * 100:.2f}%"],
+        ['Recall', f"{pairs_metrics['recall'] * 100:.2f}%"],
+        ['F1 score', f"{pairs_metrics['f1'] * 100:.2f}%"],
+        ['Equal error rate', f"{pairs_metrics['eer'] * 100:.2f}%"],
+        ['False acceptance rate', f'{far * 100:.2f}%'],
+        ['False rejection rate', f'{frr * 100:.2f}%'],
+        ['Target / non-target', f'{len(pos_scores)} / {len(neg_scores)}'],
+    ]
+
+    table = ax_table.table(
+        cellText=summary_rows,
+        colLabels=['Metric', 'Value'],
+        cellLoc='center',
+        colLoc='center',
+        colWidths=[0.64, 0.36],
+        bbox=[0.08, 0.12, 0.84, 0.75]
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.0, 1.28)
+
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor('#D9D9D9')
+        cell.set_linewidth(0.8)
+        if row == 0:
+            cell.set_facecolor('#EAEAEA')
+            cell.set_text_props(fontweight='bold', color='#1F1F1F')
+        else:
+            cell.set_facecolor('#FAFAFA' if row % 2 else 'white')
+
+    plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+
+
+def evaluate_all_pairs(
+    embeddings_dict: Dict[str, List[torch.Tensor]],
+    _speaker_labels: Sequence[str],
+    sample_ratio: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     评估所有说话人对
     
     Args:
         embeddings_dict: {speaker_id: [embeddings]}
-        speaker_labels: 所有样本的说话人标签
+        _speaker_labels: 所有样本的说话人标签，占位参数，当前实现未直接使用
         sample_ratio: 采样比例（1.0表示全部）
     
     Returns:
-        target_scores: 正样本对分数
-        non_target_scores: 负样本对分数
+        target_scores: 正样本对分数数组
+        non_target_scores: 负样本对分数数组
     """
     speakers = list(embeddings_dict.keys())
     n_speakers = len(speakers)
@@ -329,7 +516,7 @@ def evaluate_all_pairs(embeddings_dict, speaker_labels, sample_ratio=1.0):
     
     print(f"\n评估所有说话人对 (共 {n_speakers} 个说话人)...")
     
-    # 计算所有说话人对
+    # 遍历说话人组合，计算所有嵌入向量配对的余弦相似度。
     for i, spk1 in enumerate(tqdm(speakers, desc="计算说话人对")):
         emb1_list = embeddings_dict[spk1]
         
@@ -369,9 +556,30 @@ def evaluate_all_pairs(embeddings_dict, speaker_labels, sample_ratio=1.0):
     return target_scores, non_target_scores
 
 
-def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_threshold, 
-                              min_dcf, output_dir, model_name="Model"):
-    """生成综合评估报告图"""
+def plot_comprehensive_report(
+    target_scores: Sequence[float],
+    non_target_scores: Sequence[float],
+    eer: float,
+    eer_threshold: float,
+    min_dcf: float,
+    output_dir: str,
+    model_name: str = "Model",
+) -> str:
+    """
+    生成综合评估报告图，并返回图片保存路径。
+
+    Args:
+        target_scores: 同一说话人配对的相似度分数。
+        non_target_scores: 不同说话人配对的相似度分数。
+        eer: 等错误率。
+        eer_threshold: 对应 EER 的最优阈值。
+        min_dcf: 最小检测代价函数。
+        output_dir: 图表输出目录。
+        model_name: 报告中展示的模型名称。
+
+    Returns:
+        综合评估报告图的完整保存路径
+    """
     
     # 设置中文字体
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
@@ -380,7 +588,7 @@ def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_thresho
     fig = plt.figure(figsize=(20, 16))
     gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
     
-    # 1. DET曲线
+    # 1. DET 曲线
     ax1 = fig.add_subplot(gs[0, 0])
     far, mr, _ = compute_det_curve(target_scores, non_target_scores)
     ax1.plot(far * 100, mr * 100, 'b-', linewidth=2, label='DET Curve')
@@ -393,7 +601,7 @@ def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_thresho
     ax1.set_xlim([0, 100])
     ax1.set_ylim([0, 100])
     
-    # 2. ROC曲线
+    # 2. ROC 曲线
     ax2 = fig.add_subplot(gs[0, 1])
     roc_far, roc_tpr = compute_roc_curve(target_scores, non_target_scores)
     ax2.plot(roc_far * 100, roc_tpr * 100, 'g-', linewidth=2, label='ROC Curve')
@@ -459,7 +667,7 @@ def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_thresho
     ax5.set_xlim([0, 1])
     ax5.set_ylim([0, 1])
     
-    # 6. 误差分析柱状图
+    # 6. 误差指标柱状图
     ax6 = fig.add_subplot(gs[1, 2])
     metrics = ['EER', 'minDCF', 'FAR@EER', 'FRR@EER']
     values = [eer * 100, min_dcf * 100, eer * 100, eer * 100]
@@ -472,14 +680,14 @@ def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_thresho
                 f'{val:.2f}%', ha='center', va='bottom')
     ax6.grid(True, alpha=0.3, axis='y')
     
-    # 7. 性能表格
+    # 7. 性能摘要表格
     ax7 = fig.add_subplot(gs[2, 0])
     ax7.axis('off')
     
-    # 计算更多指标
+    # 计算更多汇总指标
     score_dist = compute_score_distribution(target_scores, non_target_scores)
     
-    # 计算AUC
+    # 计算 AUC
     auc = np.trapz(roc_tpr, roc_far)
     
     table_data = [
@@ -513,7 +721,7 @@ def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_thresho
     ax8 = fig.add_subplot(gs[2, 1])
     ax8.axis('off')
     
-    # 不同应用场景的阈值建议
+    # 给出不同应用场景下的阈值建议
     threshold_suggestions = [
         ['Application', 'Threshold', 'FAR', 'FRR'],
         ['High Security', f'{np.percentile(non_target_scores, 99):.4f}', '1.00%', f'{(1 - np.mean(target_scores >= np.percentile(non_target_scores, 99)))*100:.2f}%'],
@@ -533,7 +741,7 @@ def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_thresho
     
     ax8.set_title('Threshold Suggestions for Different Applications', pad=20)
     
-    # 9. 模型信息
+    # 9. 模型信息与结论摘要
     ax9 = fig.add_subplot(gs[2, 2])
     ax9.axis('off')
     
@@ -578,8 +786,28 @@ def plot_comprehensive_report(target_scores, non_target_scores, eer, eer_thresho
     return report_path
 
 
-def generate_metrics_table(target_scores, non_target_scores, eer, eer_threshold, min_dcf, output_dir):
-    """生成详细的指标表格（CSV格式）"""
+def generate_metrics_table(
+    target_scores: Sequence[float],
+    non_target_scores: Sequence[float],
+    eer: float,
+    eer_threshold: float,
+    min_dcf: float,
+    output_dir: str,
+) -> Tuple[str, str]:
+    """
+    生成详细指标表与汇总表，并返回两个 CSV 路径。
+
+    Args:
+        target_scores: 同一说话人配对的相似度分数。
+        non_target_scores: 不同说话人配对的相似度分数。
+        eer: 等错误率。
+        eer_threshold: 对应 EER 的阈值。
+        min_dcf: 最小检测代价函数。
+        output_dir: 输出目录。
+
+    Returns:
+        `(阈值分析表路径, 评估汇总表路径)`
+    """
     import csv
     
     # 计算各种阈值下的性能
@@ -601,7 +829,7 @@ def generate_metrics_table(target_scores, non_target_scores, eer, eer_threshold,
             'F1': 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
         })
     
-    # 保存CSV
+    # 保存阈值分析表
     csv_path = os.path.join(output_dir, 'threshold_analysis.csv')
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=['threshold', 'FAR', 'FRR', 'precision', 'recall', 'F1'])
@@ -610,7 +838,7 @@ def generate_metrics_table(target_scores, non_target_scores, eer, eer_threshold,
     
     print(f"阈值分析表已保存: {csv_path}")
     
-    # 生成汇总表
+    # 生成评估汇总表
     summary_path = os.path.join(output_dir, 'evaluation_summary.csv')
     with open(summary_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -630,8 +858,15 @@ def generate_metrics_table(target_scores, non_target_scores, eer, eer_threshold,
     return csv_path, summary_path
 
 
-def evaluate_classification_accuracy(verification, classifier, valid_loader, device, 
-                                     speaker_to_idx, idx_to_speaker, loss_type='softmax'):
+def evaluate_classification_accuracy(
+    verification: SpeakerRecognition,
+    classifier: nn.Module,
+    valid_loader: DataLoader,
+    device: torch.device,
+    speaker_to_idx: Dict[str, int],
+    _idx_to_speaker: Dict[int, str],
+    loss_type: str = 'softmax',
+) -> Optional[Dict[str, Any]]:
     """
     评估分类准确率
     
@@ -641,11 +876,11 @@ def evaluate_classification_accuracy(verification, classifier, valid_loader, dev
         valid_loader: 验证数据加载器
         device: 设备
         speaker_to_idx: 说话人名称到索引的映射
-        idx_to_speaker: 索引到说话人名称的映射
+        _idx_to_speaker: 索引到说话人名称的映射，占位参数，当前实现未直接使用
         loss_type: 损失函数类型
     
     Returns:
-        dict: 包含准确率、每类准确率等指标
+        包含准确率、每类准确率等指标的字典；若无有效样本则返回 `None`
     """
     classifier.eval()
     
@@ -679,12 +914,12 @@ def evaluate_classification_accuracy(verification, classifier, valid_loader, dev
                 logits = classifier(embedding)
                 probs = torch.softmax(logits, dim=-1)
             else:
-                # AAM-Softmax 需要传入标签才能计算，这里用余弦相似度
+                # AAM-Softmax 评估阶段不直接计算损失，这里使用归一化后的余弦相似度做分类打分。
                 weight = classifier.weight  # [num_classes, embedding_dim]
-                # 归一化
+                # 对嵌入和权重做归一化，保持与余弦分类假设一致。
                 embedding_norm = torch.nn.functional.normalize(embedding, p=2, dim=-1)
                 weight_norm = torch.nn.functional.normalize(weight, p=2, dim=0)
-                # 计算余弦相似度
+                # 计算每个类别原型与当前嵌入之间的余弦相似度。
                 similarities = torch.matmul(weight_norm.T, embedding_norm)  # [num_classes]
                 probs = similarities
             
@@ -703,7 +938,7 @@ def evaluate_classification_accuracy(verification, classifier, valid_loader, dev
             if pred_idx == true_label:
                 correct_per_speaker[speaker_id_str] += 1
     
-    # 检查是否有有效样本
+    # 若一个有效样本都没有，则无法继续计算分类指标。
     if len(all_predictions) == 0:
         print(f"\n错误: 没有有效样本可评估！")
         print(f"  验证集中的说话人不在训练集中: {unknown_speakers}")
@@ -711,7 +946,7 @@ def evaluate_classification_accuracy(verification, classifier, valid_loader, dev
         print(f"\n请确保验证集和训练集使用相同的说话人!")
         return None
     
-    # 打印未知说话人统计
+    # 打印未知说话人统计信息，方便排查训练集与验证集标签不一致的问题。
     if unknown_count > 0:
         print(f"\n警告: 跳过了 {unknown_count} 个样本（来自 {len(unknown_speakers)} 个未知说话人）")
         print(f"  未知说话人: {unknown_speakers}")
@@ -723,12 +958,12 @@ def evaluate_classification_accuracy(verification, classifier, valid_loader, dev
     
     accuracy = np.mean(all_predictions == all_labels)
     
-    # 计算每个说话人的准确率
+    # 计算每个说话人的准确率。
     per_speaker_accuracy = {}
     for spk in total_per_speaker:
         per_speaker_accuracy[spk] = correct_per_speaker[spk] / total_per_speaker[spk]
     
-    # 计算混淆矩阵中的关键指标
+    # 计算宏平均分类指标与混淆矩阵。
     from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix
     
     f1 = f1_score(all_labels, all_predictions, average='macro', zero_division=0)
@@ -752,8 +987,22 @@ def evaluate_classification_accuracy(verification, classifier, valid_loader, dev
     }
 
 
-def plot_classification_report(metrics, speaker_to_idx, output_dir):
-    """生成分类评估报告图"""
+def plot_classification_report(
+    metrics: Dict[str, Any],
+    speaker_to_idx: Dict[str, int],
+    output_dir: str,
+) -> str:
+    """
+    生成分类评估报告图，并返回图片保存路径。
+
+    Args:
+        metrics: 分类评估得到的指标字典。
+        speaker_to_idx: 说话人到类别索引的映射。
+        output_dir: 图表输出目录。
+
+    Returns:
+        分类评估报告图的完整保存路径
+    """
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
     plt.rcParams['axes.unicode_minus'] = False
     
@@ -852,7 +1101,8 @@ def plot_classification_report(metrics, speaker_to_idx, output_dir):
     return report_path
 
 
-def main():
+def main() -> None:
+    """解析命令行参数并执行对应的评估流程。"""
     import argparse
     parser = argparse.ArgumentParser(description='模型评估脚本')
     parser.add_argument('--checkpoint', type=str, default='checkpoints/classifier_final.pt', help='模型检查点路径')
@@ -965,45 +1215,12 @@ def main():
         generated_files.append(('验证对结果', pairs_csv_output))
         
         # 绘制分数分布图
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
         
         # 分数分布直方图
-        ax1 = axes[0]
-        scores = pairs_metrics['scores']
-        labels_arr = pairs_metrics['labels']
-        pos_scores = scores[labels_arr == 1]
-        neg_scores = scores[labels_arr == 0]
-        ax1.hist(pos_scores, bins=30, alpha=0.7, label=f'Same Speaker (n={len(pos_scores)})', color='green')
-        ax1.hist(neg_scores, bins=30, alpha=0.7, label=f'Different Speaker (n={len(neg_scores)})', color='red')
-        ax1.axvline(x=pairs_metrics['threshold'], color='blue', linestyle='--', linewidth=2, 
-                   label=f"Threshold = {pairs_metrics['threshold']:.4f}")
-        ax1.axvline(x=pairs_metrics['eer_threshold'], color='orange', linestyle=':', linewidth=2,
-                   label=f"EER Threshold = {pairs_metrics['eer_threshold']:.4f}")
-        ax1.set_xlabel('Cosine Similarity')
-        ax1.set_ylabel('Count')
-        ax1.set_title('Score Distribution')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
         
         # 混淆矩阵可视化
-        ax2 = axes[1]
-        cm = np.array([[pairs_metrics['tn'], pairs_metrics['fp']], 
-                       [pairs_metrics['fn'], pairs_metrics['tp']]])
-        im = ax2.imshow(cm, cmap='Blues')
-        ax2.set_xticks([0, 1])
-        ax2.set_yticks([0, 1])
-        ax2.set_xticklabels(['Predicted 0', 'Predicted 1'])
-        ax2.set_yticklabels(['Actual 0', 'Actual 1'])
-        for i in range(2):
-            for j in range(2):
-                ax2.text(j, i, cm[i, j], ha='center', va='center', fontsize=16, fontweight='bold')
-        ax2.set_title(f'Confusion Matrix\nAccuracy: {pairs_metrics["accuracy"]*100:.2f}%')
-        plt.colorbar(im, ax=ax2)
-        
-        plt.tight_layout()
         fig_path = os.path.join(args.output, 'verification_pairs_report.png')
-        plt.savefig(fig_path, dpi=150, bbox_inches='tight')
-        plt.close()
+        plot_verification_pairs_report(pairs_metrics, fig_path)
         print(f"报告图已保存: {fig_path}")
         generated_files.append(('验证对报告图', fig_path))
     

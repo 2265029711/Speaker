@@ -292,6 +292,26 @@ python scripts/evaluate_model.py --mode pairs \
     --output logs/eval_results
 ```
 
+**生成混淆矩阵图与分数分布图：**
+
+下面这条命令会直接生成 `verification_pairs_report.png`，其中包含：
+- 左侧余弦相似度分布图
+- 右侧混淆矩阵图
+
+```bash
+python scripts/evaluate_model.py --mode pairs \
+    --checkpoint checkpoints/classifier_final.pt \
+    --config config/config.yaml \
+    --pairs_csv data/valid_pairs.csv \
+    --output logs/metrics
+```
+
+生成后的图片路径为：
+
+```text
+logs/metrics/verification_pairs_report.png
+```
+
 **验证对 CSV 格式：**
 ```csv
 audio1,audio2,label
