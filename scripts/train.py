@@ -39,7 +39,7 @@ SpeakerBatch = Dict[str, Any]
 
 class EarlyStopping:
     """早停控制器，支持单指标模式和准确率优先的混合评分模式。"""
-
+    
     def __init__(
         self,
         patience: int = 5,

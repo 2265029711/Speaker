@@ -147,74 +147,17 @@ pip install torchcodec==0.10.0 speechbrain==1.0.3 numpy==2.3.5 pandas==3.0.1 PyY
 
 ## 快速开始
 
-### 1. 模型训练
-
 ```bash
-# 基本训练（使用默认配置）
+# 1. 训练模型（可选，可直接使用预训练模型）
 python scripts/train.py
 
-# 指定配置文件
-python scripts/train.py --config config/config.yaml
-```
-
-**训练参数说明：**
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--config` | config/config.yaml | 配置文件路径 |
-
-**训练输出：**
-- `checkpoints/classifier_best.pt` - 最佳模型（训练准确率最高）
-- `checkpoints/classifier_final.pt` - 最终模型
-- `checkpoints/classifier_epoch_N.pt` - 每 5 轮保存的检查点
-- `logs/metrics/epoch_N_metrics.png` - 每轮训练指标图
-- `logs/metrics/training_trends.png` - 训练趋势图
-
-### 2. 模型验证
-
-```bash
-# 验证对准确率评估（推荐）
-python scripts/evaluate_model.py --mode pairs --pairs_csv data/valid_pairs.csv
-
-# 分类准确率评估
-python scripts/evaluate_model.py --mode classification --checkpoint checkpoints/classifier_final.pt
-
-# 说话人验证 EER 评估
-python scripts/evaluate_model.py --mode verification --checkpoint checkpoints/classifier_final.pt
-
-# 综合评估（所有模式）
-python scripts/evaluate_model.py --mode both --checkpoint checkpoints/classifier_final.pt
-```
-
-**验证参数说明：**
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--checkpoint` | checkpoints/classifier_final.pt | 模型检查点路径 |
-| `--config` | config/config.yaml | 配置文件路径 |
-| `--output` | logs/metrics | 输出目录 |
-| `--mode` | pairs | 评估模式：pairs/classification/verification/both |
-| `--pairs_csv` | data/valid_pairs.csv | 验证对CSV文件路径 |
-| `--threshold` | 0.5 | 相似度阈值 |
-| `--sample_ratio` | 0.1 | 采样比例（加速验证评估） |
-
-**验证输出：**
-- `logs/metrics/verification_results.csv` - 验证对结果详情
-- `logs/metrics/verification_pairs_report.png` - 验证对报告图
-- `logs/metrics/classification_report.png` - 分类报告图
-- `logs/metrics/model_evaluation_report.png` - 综合评估报告
-- `logs/metrics/evaluation_summary.csv` - 评估汇总表
-
-### 3. 声纹注册与认证
-
-```bash
-# 注册声纹（使用训练后的模型）
+# 2. 注册声纹（使用训练后的模型）
 python scripts/enroll.py --user_id user_001 --audio path/to/voice.wav --checkpoint checkpoints/classifier_final.pt
 
-# 1:1 身份认证
+# 3. 身份认证
 python scripts/verify.py --user_id user_001 --audio path/to/test.wav --checkpoint checkpoints/classifier_final.pt
 
-# 1:N 说话人辨认
+# 4. 说话人辨认
 python scripts/verify.py --audio path/to/test.wav --identify --checkpoint checkpoints/classifier_final.pt
 ```
 

@@ -47,6 +47,7 @@ checkpoints/
 
 # Logs and outputs
 *.log
+log/
 
 # Voiceprint database
 voiceprint_db.json
@@ -54,3 +55,6 @@ voiceprint_db.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# model
+pretrained_models/
