@@ -37,7 +37,8 @@ env/
 
 # Project specific
 .iflow/
-data/
+data/train/
+data/valid/
 
 # Model and checkpoints
 checkpoints/
