@@ -22,6 +22,7 @@ from speechbrain.inference.speaker import SpeakerRecognition
 from torch.utils.data import DataLoader, Dataset
 
 from utils.losses import AAMSoftmax
+from utils.plot_config import setup_matplotlib_for_chinese
 
 
 SpeakerSample = Dict[str, Any]
@@ -319,6 +320,8 @@ def _style_report_axes(ax: Any) -> None:
 
 def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: str) -> None:
     """生成验证对评估报告图，并保存到指定路径。"""
+    setup_matplotlib_for_chinese()
+
     scores = pairs_metrics['scores']
     labels_arr = pairs_metrics['labels']
     pos_scores = scores[labels_arr == 1]
@@ -352,7 +355,7 @@ def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: s
     ax_header.text(
         0.5,
         0.78,
-        'Speaker Verification Pair Report',
+        '说话人验证对评估报告',
         ha='center',
         va='center',
         fontsize=20,
@@ -376,7 +379,7 @@ def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: s
         color='#C44E52',
         edgecolor='white',
         linewidth=0.8,
-        label=f'Non-target trials (n={len(neg_scores)})'
+        label=f'异说话人样本对（n={len(neg_scores)}）'
     )
     ax_dist.hist(
         pos_scores,
@@ -386,7 +389,7 @@ def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: s
         color='#4C72B0',
         edgecolor='white',
         linewidth=0.8,
-        label=f'Target trials (n={len(pos_scores)})'
+        label=f'同说话人样本对（n={len(pos_scores)}）'
     )
     ax_dist.axvline(
         pairs_metrics['threshold'],
@@ -396,11 +399,11 @@ def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: s
         alpha=0.9,
         ymin=0.0,
         ymax=0.88,
-        label=f'Operating threshold = {pairs_metrics["threshold"]:.4f}'
+        label=f'当前阈值 = {pairs_metrics["threshold"]:.4f}'
     )
-    ax_dist.set_title('Verification Score Distribution', fontsize=14, fontweight='bold', pad=34)
-    ax_dist.set_xlabel('Cosine similarity score', fontsize=11, labelpad=2)
-    ax_dist.set_ylabel('Density', fontsize=11)
+    ax_dist.set_title('验证分数分布', fontsize=14, fontweight='bold', pad=34)
+    ax_dist.set_xlabel('余弦相似度分数', fontsize=11, labelpad=2)
+    ax_dist.set_ylabel('密度', fontsize=11)
     ax_dist.grid(True, axis='y', linestyle='--', linewidth=0.6, alpha=0.25)
     ax_dist.legend(
         loc='upper center',
@@ -418,13 +421,13 @@ def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: s
     ax_cm = fig.add_subplot(bottom_gs[0, 0])
     _style_report_axes(ax_cm)
     im = ax_cm.imshow(cm_normalized, cmap='Blues', vmin=0.0, vmax=1.0)
-    ax_cm.set_title('Confusion Matrix (row-normalized)', fontsize=13, fontweight='bold', pad=6)
-    ax_cm.set_xlabel('Predicted label', fontsize=11)
-    ax_cm.set_ylabel('True label', fontsize=11)
+    ax_cm.set_title('混淆矩阵（按行归一化）', fontsize=13, fontweight='bold', pad=6)
+    ax_cm.set_xlabel('预测标签', fontsize=11)
+    ax_cm.set_ylabel('真实标签', fontsize=11)
     ax_cm.set_xticks([0, 1])
     ax_cm.set_yticks([0, 1])
-    ax_cm.set_xticklabels(['Different speaker', 'Same speaker'])
-    ax_cm.set_yticklabels(['Different speaker', 'Same speaker'])
+    ax_cm.set_xticklabels(['不同说话人', '同一说话人'])
+    ax_cm.set_yticklabels(['不同说话人', '同一说话人'])
     ax_cm.set_xticks(np.arange(-0.5, 2, 1), minor=True)
     ax_cm.set_yticks(np.arange(-0.5, 2, 1), minor=True)
     ax_cm.grid(which='minor', color='white', linestyle='-', linewidth=2)
@@ -446,29 +449,29 @@ def plot_verification_pairs_report(pairs_metrics: Dict[str, Any], output_path: s
             )
 
     cbar = fig.colorbar(im, ax=ax_cm, fraction=0.046, pad=0.04)
-    cbar.set_label('Row proportion', fontsize=10)
+    cbar.set_label('行占比', fontsize=10)
     cbar.ax.tick_params(labelsize=9)
 
     ax_table = fig.add_subplot(bottom_gs[0, 1])
     ax_table.axis('off')
-    ax_table.set_title('Evaluation Summary', fontsize=13, fontweight='bold', pad=10)
+    ax_table.set_title('评估摘要', fontsize=13, fontweight='bold', pad=10)
 
     summary_rows = [
-        ['Operating threshold', f"{pairs_metrics['threshold']:.4f}"],
-        ['EER threshold', f"{pairs_metrics['eer_threshold']:.4f}"],
-        ['Accuracy', f"{pairs_metrics['accuracy'] * 100:.2f}%"],
-        ['Precision', f"{pairs_metrics['precision'] * 100:.2f}%"],
-        ['Recall', f"{pairs_metrics['recall'] * 100:.2f}%"],
-        ['F1 score', f"{pairs_metrics['f1'] * 100:.2f}%"],
-        ['Equal error rate', f"{pairs_metrics['eer'] * 100:.2f}%"],
-        ['False acceptance rate', f'{far * 100:.2f}%'],
-        ['False rejection rate', f'{frr * 100:.2f}%'],
-        ['Target / non-target', f'{len(pos_scores)} / {len(neg_scores)}'],
+        ['当前阈值', f"{pairs_metrics['threshold']:.4f}"],
+        ['EER 阈值', f"{pairs_metrics['eer_threshold']:.4f}"],
+        ['准确率', f"{pairs_metrics['accuracy'] * 100:.2f}%"],
+        ['精确率', f"{pairs_metrics['precision'] * 100:.2f}%"],
+        ['召回率', f"{pairs_metrics['recall'] * 100:.2f}%"],
+        ['F1 值', f"{pairs_metrics['f1'] * 100:.2f}%"],
+        ['等错误率', f"{pairs_metrics['eer'] * 100:.2f}%"],
+        ['误接受率', f'{far * 100:.2f}%'],
+        ['误拒绝率', f'{frr * 100:.2f}%'],
+        ['同说话人 / 异说话人', f'{len(pos_scores)} / {len(neg_scores)}'],
     ]
 
     table = ax_table.table(
         cellText=summary_rows,
-        colLabels=['Metric', 'Value'],
+        colLabels=['指标', '数值'],
         cellLoc='center',
         colLoc='center',
         colWidths=[0.64, 0.36],
@@ -580,10 +583,7 @@ def plot_comprehensive_report(
     Returns:
         综合评估报告图的完整保存路径
     """
-    
-    # 设置中文字体
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
+    setup_matplotlib_for_chinese()
     
     fig = plt.figure(figsize=(20, 16))
     gs = GridSpec(3, 3, figure=fig, hspace=0.3, wspace=0.3)
@@ -591,11 +591,11 @@ def plot_comprehensive_report(
     # 1. DET 曲线
     ax1 = fig.add_subplot(gs[0, 0])
     far, mr, _ = compute_det_curve(target_scores, non_target_scores)
-    ax1.plot(far * 100, mr * 100, 'b-', linewidth=2, label='DET Curve')
+    ax1.plot(far * 100, mr * 100, 'b-', linewidth=2, label='DET曲线')
     ax1.scatter([eer * 100], [eer * 100], color='red', s=100, zorder=5, label=f'EER = {eer*100:.2f}%')
-    ax1.set_xlabel('False Alarm Rate (%)')
-    ax1.set_ylabel('Miss Rate (%)')
-    ax1.set_title('DET Curve (Detection Error Trade-off)')
+    ax1.set_xlabel('误接受率（%）')
+    ax1.set_ylabel('漏拒率（%）')
+    ax1.set_title('DET曲线（检测误差权衡）')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     ax1.set_xlim([0, 100])
@@ -604,24 +604,24 @@ def plot_comprehensive_report(
     # 2. ROC 曲线
     ax2 = fig.add_subplot(gs[0, 1])
     roc_far, roc_tpr = compute_roc_curve(target_scores, non_target_scores)
-    ax2.plot(roc_far * 100, roc_tpr * 100, 'g-', linewidth=2, label='ROC Curve')
-    ax2.plot([0, 100], [0, 100], 'k--', alpha=0.5, label='Random')
+    ax2.plot(roc_far * 100, roc_tpr * 100, 'g-', linewidth=2, label='ROC曲线')
+    ax2.plot([0, 100], [0, 100], 'k--', alpha=0.5, label='随机基线')
     ax2.fill_between(roc_far * 100, 0, roc_tpr * 100, alpha=0.2, color='green')
-    ax2.set_xlabel('False Alarm Rate (%)')
-    ax2.set_ylabel('True Positive Rate (%)')
-    ax2.set_title('ROC Curve')
+    ax2.set_xlabel('误接受率（%）')
+    ax2.set_ylabel('真阳性率（%）')
+    ax2.set_title('ROC曲线')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
     # 3. 分数分布
     ax3 = fig.add_subplot(gs[0, 2])
     bins = np.linspace(-0.5, 1.0, 100)
-    ax3.hist(target_scores, bins=bins, alpha=0.6, label='Same Speaker', color='green', density=True)
-    ax3.hist(non_target_scores, bins=bins, alpha=0.6, label='Different Speaker', color='red', density=True)
-    ax3.axvline(x=eer_threshold, color='blue', linestyle='--', linewidth=2, label=f'Threshold = {eer_threshold:.4f}')
-    ax3.set_xlabel('Cosine Similarity Score')
-    ax3.set_ylabel('Density')
-    ax3.set_title('Score Distribution')
+    ax3.hist(target_scores, bins=bins, alpha=0.6, label='同一说话人', color='green', density=True)
+    ax3.hist(non_target_scores, bins=bins, alpha=0.6, label='不同说话人', color='red', density=True)
+    ax3.axvline(x=eer_threshold, color='blue', linestyle='--', linewidth=2, label=f'阈值 = {eer_threshold:.4f}')
+    ax3.set_xlabel('余弦相似度分数')
+    ax3.set_ylabel('密度')
+    ax3.set_title('分数分布')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
@@ -635,12 +635,12 @@ def plot_comprehensive_report(
         frr = np.mean(target_scores < th)
         fars.append(far * 100)
         frrs.append(frr * 100)
-    ax4.plot(thresholds, fars, 'r-', label='FAR (False Acceptance Rate)')
-    ax4.plot(thresholds, frrs, 'b-', label='FRR (False Rejection Rate)')
-    ax4.axvline(x=eer_threshold, color='green', linestyle='--', label=f'EER Threshold')
-    ax4.set_xlabel('Threshold')
-    ax4.set_ylabel('Error Rate (%)')
-    ax4.set_title('FAR/FRR vs Threshold')
+    ax4.plot(thresholds, fars, 'r-', label='FAR（误接受率）')
+    ax4.plot(thresholds, frrs, 'b-', label='FRR（误拒绝率）')
+    ax4.axvline(x=eer_threshold, color='green', linestyle='--', label='EER 阈值')
+    ax4.set_xlabel('阈值')
+    ax4.set_ylabel('错误率（%）')
+    ax4.set_title('FAR/FRR 与阈值关系')
     ax4.legend()
     ax4.grid(True, alpha=0.3)
     
@@ -660,9 +660,9 @@ def plot_comprehensive_report(
         recall_list.append(recall)
     
     ax5.plot(recall_list, precision_list, 'purple', linewidth=2)
-    ax5.set_xlabel('Recall')
-    ax5.set_ylabel('Precision')
-    ax5.set_title('Precision-Recall Curve')
+    ax5.set_xlabel('召回率')
+    ax5.set_ylabel('精确率')
+    ax5.set_title('精确率-召回率曲线')
     ax5.grid(True, alpha=0.3)
     ax5.set_xlim([0, 1])
     ax5.set_ylim([0, 1])
@@ -673,8 +673,8 @@ def plot_comprehensive_report(
     values = [eer * 100, min_dcf * 100, eer * 100, eer * 100]
     colors = ['red', 'orange', 'blue', 'green']
     bars = ax6.bar(metrics, values, color=colors, alpha=0.7)
-    ax6.set_ylabel('Value (%)')
-    ax6.set_title('Error Metrics Summary')
+    ax6.set_ylabel('数值（%）')
+    ax6.set_title('错误指标汇总')
     for bar, val in zip(bars, values):
         ax6.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
                 f'{val:.2f}%', ha='center', va='bottom')
@@ -691,17 +691,17 @@ def plot_comprehensive_report(
     auc = np.trapz(roc_tpr, roc_far)
     
     table_data = [
-        ['Metric', 'Value'],
+        ['指标', '数值'],
         ['EER', f'{eer*100:.4f}%'],
-        ['EER Threshold', f'{eer_threshold:.4f}'],
+        ['EER 阈值', f'{eer_threshold:.4f}'],
         ['minDCF', f'{min_dcf:.4f}'],
         ['AUC', f'{auc:.4f}'],
-        ['Target Score Mean', f'{score_dist["target_mean"]:.4f}'],
-        ['Target Score Std', f'{score_dist["target_std"]:.4f}'],
-        ['Non-Target Score Mean', f'{score_dist["non_target_mean"]:.4f}'],
-        ['Non-Target Std', f'{score_dist["non_target_std"]:.4f}'],
-        ['Target Pairs', f'{len(target_scores)}'],
-        ['Non-Target Pairs', f'{len(non_target_scores)}'],
+        ['同说话人均值', f'{score_dist["target_mean"]:.4f}'],
+        ['同说话人标准差', f'{score_dist["target_std"]:.4f}'],
+        ['异说话人均值', f'{score_dist["non_target_mean"]:.4f}'],
+        ['异说话人标准差', f'{score_dist["non_target_std"]:.4f}'],
+        ['同说话人样本对', f'{len(target_scores)}'],
+        ['异说话人样本对', f'{len(non_target_scores)}'],
     ]
     
     table = ax7.table(cellText=table_data, loc='center', cellLoc='center',
@@ -715,7 +715,7 @@ def plot_comprehensive_report(
         table[(0, i)].set_facecolor('#4472C4')
         table[(0, i)].set_text_props(color='white', fontweight='bold')
     
-    ax7.set_title('Performance Metrics Summary', pad=20)
+    ax7.set_title('性能指标汇总', pad=20)
     
     # 8. 阈值选择建议
     ax8 = fig.add_subplot(gs[2, 1])
@@ -723,10 +723,10 @@ def plot_comprehensive_report(
     
     # 给出不同应用场景下的阈值建议
     threshold_suggestions = [
-        ['Application', 'Threshold', 'FAR', 'FRR'],
-        ['High Security', f'{np.percentile(non_target_scores, 99):.4f}', '1.00%', f'{(1 - np.mean(target_scores >= np.percentile(non_target_scores, 99)))*100:.2f}%'],
-        ['Balanced', f'{eer_threshold:.4f}', f'{eer*100:.2f}%', f'{eer*100:.2f}%'],
-        ['High Convenience', f'{np.percentile(target_scores, 1):.4f}', f'{np.mean(non_target_scores >= np.percentile(target_scores, 1))*100:.2f}%', '1.00%'],
+        ['应用场景', '建议阈值', 'FAR', 'FRR'],
+        ['高安全性', f'{np.percentile(non_target_scores, 99):.4f}', '1.00%', f'{(1 - np.mean(target_scores >= np.percentile(non_target_scores, 99)))*100:.2f}%'],
+        ['均衡场景', f'{eer_threshold:.4f}', f'{eer*100:.2f}%', f'{eer*100:.2f}%'],
+        ['高便捷性', f'{np.percentile(target_scores, 1):.4f}', f'{np.mean(non_target_scores >= np.percentile(target_scores, 1))*100:.2f}%', '1.00%'],
     ]
     
     table2 = ax8.table(cellText=threshold_suggestions, loc='center', cellLoc='center',
@@ -739,41 +739,38 @@ def plot_comprehensive_report(
         table2[(0, i)].set_facecolor('#4472C4')
         table2[(0, i)].set_text_props(color='white', fontweight='bold')
     
-    ax8.set_title('Threshold Suggestions for Different Applications', pad=20)
+    ax8.set_title('不同场景阈值建议', pad=20)
     
     # 9. 模型信息与结论摘要
     ax9 = fig.add_subplot(gs[2, 2])
     ax9.axis('off')
     
     info_text = f"""
-    Model Evaluation Report
-    ========================
-    
-    Model: {model_name}
-    
-    Key Findings:
-    - Equal Error Rate (EER): {eer*100:.2f}%
-    - Optimal Threshold: {eer_threshold:.4f}
-    - Minimum DCF: {min_dcf:.4f}
-    - ROC AUC: {auc:.4f}
-    
-    Score Statistics:
-    - Same speaker pairs tend to have
-      higher similarity scores
-    - Clear separation between target
-      and non-target distributions
-    
-    Recommendations:
-    - Use threshold around {eer_threshold:.4f}
-      for balanced FAR/FRR
-    - Adjust based on security needs
-    """
+模型评估摘要
+========================
+
+模型名称：{model_name}
+
+核心结论：
+- 等错误率（EER）：{eer*100:.2f}%
+- 最优阈值：{eer_threshold:.4f}
+- 最小 DCF：{min_dcf:.4f}
+- ROC AUC：{auc:.4f}
+
+分数分布观察：
+- 同一说话人样本对通常具有更高相似度
+- 同说话人与异说话人分布区分较明显
+
+建议：
+- 若追求 FAR / FRR 平衡，可优先使用 {eer_threshold:.4f}
+- 实际部署时可按安全需求继续微调阈值
+"""
     
     ax9.text(0.1, 0.5, info_text, transform=ax9.transAxes, fontsize=10,
-             verticalalignment='center', fontfamily='monospace',
+             verticalalignment='center',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
-    plt.suptitle(f'Speaker Verification Model Evaluation Report\n{model_name}', 
+    plt.suptitle(f'说话人验证模型评估报告\n{model_name}', 
                  fontsize=16, fontweight='bold', y=0.98)
     
     # 保存图片
@@ -1003,19 +1000,18 @@ def plot_classification_report(
     Returns:
         分类评估报告图的完整保存路径
     """
-    plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
+    setup_matplotlib_for_chinese()
     
     fig, axes = plt.subplots(2, 2, figsize=(16, 14))
     
     # 1. 整体指标
     ax1 = axes[0, 0]
-    metric_names = ['Accuracy', 'F1', 'Precision', 'Recall']
+    metric_names = ['准确率', 'F1值', '精确率', '召回率']
     metric_values = [metrics['accuracy'], metrics['f1'], metrics['precision'], metrics['recall']]
     colors = ['#4CAF50', '#2196F3', '#FF9800', '#9C27B0']
     bars = ax1.bar(metric_names, [v * 100 for v in metric_values], color=colors, alpha=0.8)
-    ax1.set_ylabel('Percentage (%)')
-    ax1.set_title('Overall Classification Metrics')
+    ax1.set_ylabel('百分比（%）')
+    ax1.set_title('整体分类指标')
     ax1.set_ylim([0, 105])
     for bar, val in zip(bars, metric_values):
         ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
@@ -1039,10 +1035,10 @@ def plot_classification_report(
     
     colors = ['#f44336' if acc < 0.8 else '#4CAF50' for acc in accuracies]
     ax2.barh(speakers, [a * 100 for a in accuracies], color=colors, alpha=0.7)
-    ax2.set_xlabel('Accuracy (%)')
-    ax2.set_title('Per-Speaker Accuracy (sorted)')
+    ax2.set_xlabel('准确率（%）')
+    ax2.set_title('各说话人准确率（排序）')
     ax2.set_xlim([0, 105])
-    ax2.axvline(x=80, color='orange', linestyle='--', linewidth=2, label='80% threshold')
+    ax2.axvline(x=80, color='orange', linestyle='--', linewidth=2, label='80%阈值')
     ax2.legend()
     ax2.grid(True, alpha=0.3, axis='x')
     
@@ -1051,10 +1047,10 @@ def plot_classification_report(
     all_accs = list(metrics['per_speaker_accuracy'].values())
     ax3.hist([a * 100 for a in all_accs], bins=20, color='#2196F3', alpha=0.7, edgecolor='white')
     ax3.axvline(x=np.mean(all_accs) * 100, color='red', linestyle='--', linewidth=2, 
-                label=f'Mean: {np.mean(all_accs)*100:.2f}%')
-    ax3.set_xlabel('Accuracy (%)')
-    ax3.set_ylabel('Number of Speakers')
-    ax3.set_title('Distribution of Per-Speaker Accuracy')
+                label=f'均值：{np.mean(all_accs)*100:.2f}%')
+    ax3.set_xlabel('准确率（%）')
+    ax3.set_ylabel('说话人数')
+    ax3.set_title('说话人准确率分布')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
@@ -1064,17 +1060,17 @@ def plot_classification_report(
     
     all_accs = list(metrics['per_speaker_accuracy'].values())
     table_data = [
-        ['Metric', 'Value'],
-        ['Overall Accuracy', f'{metrics["accuracy"]*100:.4f}%'],
-        ['F1 Score (Macro)', f'{metrics["f1"]*100:.4f}%'],
-        ['Precision (Macro)', f'{metrics["precision"]*100:.4f}%'],
-        ['Recall (Macro)', f'{metrics["recall"]*100:.4f}%'],
-        ['Total Samples', f'{metrics["total_samples"]}'],
-        ['Correct Predictions', f'{metrics["correct_predictions"]}'],
-        ['Number of Speakers', f'{len(metrics["per_speaker_accuracy"])}'],
-        ['Min Speaker Accuracy', f'{min(all_accs)*100:.2f}%'],
-        ['Max Speaker Accuracy', f'{max(all_accs)*100:.2f}%'],
-        ['Std Speaker Accuracy', f'{np.std(all_accs)*100:.2f}%'],
+        ['指标', '数值'],
+        ['整体准确率', f'{metrics["accuracy"]*100:.4f}%'],
+        ['F1 值（宏平均）', f'{metrics["f1"]*100:.4f}%'],
+        ['精确率（宏平均）', f'{metrics["precision"]*100:.4f}%'],
+        ['召回率（宏平均）', f'{metrics["recall"]*100:.4f}%'],
+        ['总样本数', f'{metrics["total_samples"]}'],
+        ['预测正确数', f'{metrics["correct_predictions"]}'],
+        ['说话人数', f'{len(metrics["per_speaker_accuracy"])}'],
+        ['最低说话人准确率', f'{min(all_accs)*100:.2f}%'],
+        ['最高说话人准确率', f'{max(all_accs)*100:.2f}%'],
+        ['说话人准确率标准差', f'{np.std(all_accs)*100:.2f}%'],
     ]
     
     table = ax4.table(cellText=table_data, loc='center', cellLoc='center',
@@ -1087,9 +1083,9 @@ def plot_classification_report(
         table[(0, i)].set_facecolor('#4472C4')
         table[(0, i)].set_text_props(color='white', fontweight='bold')
     
-    ax4.set_title('Classification Summary', pad=20)
+    ax4.set_title('分类摘要', pad=20)
     
-    plt.suptitle('Speaker Classification Evaluation Report', fontsize=16, fontweight='bold', y=0.98)
+    plt.suptitle('说话人分类评估报告', fontsize=16, fontweight='bold', y=0.98)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     
     report_path = os.path.join(output_dir, 'classification_report.png')

@@ -9,37 +9,73 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, f1_score, precision_score, recall_score
 import os
 
+from utils.plot_config import setup_matplotlib_for_chinese
+
+
+_EXACT_METRIC_LABELS = {
+    'train_loss': '训练损失',
+    'train_acc': '训练准确率',
+    'train_accuracy': '训练准确率',
+    'train_f1': '训练F1值',
+    'train_precision': '训练精确率',
+    'train_recall': '训练召回率',
+    'val_loss': '验证损失',
+    'val_acc': '验证准确率',
+    'val_accuracy': '验证准确率',
+    'val_f1': '验证F1值',
+    'val_precision': '验证精确率',
+    'val_recall': '验证召回率',
+    'valid_loss': '验证损失',
+    'valid_acc': '验证准确率',
+    'valid_accuracy': '验证准确率',
+    'valid_f1': '验证F1值',
+    'valid_precision': '验证精确率',
+    'valid_recall': '验证召回率',
+    'test_loss': '测试损失',
+    'test_acc': '测试准确率',
+    'test_accuracy': '测试准确率',
+    'test_f1': '测试F1值',
+    'test_precision': '测试精确率',
+    'test_recall': '测试召回率',
+    'eer': 'EER',
+    'min_dcf': '最小DCF',
+}
+
 
 def _format_metric_name(metric_name: str) -> str:
     """将内部指标名称转换为适合展示的标签。"""
-    tokens = metric_name.replace('-', '_').split('_')
+    normalized = metric_name.lower().replace('-', '_')
+    if normalized in _EXACT_METRIC_LABELS:
+        return _EXACT_METRIC_LABELS[normalized]
+
+    tokens = normalized.split('_')
     prefix_labels = {
-        'train': 'Train',
-        'val': 'Validation',
-        'valid': 'Validation',
-        'test': 'Test',
+        'train': '训练',
+        'val': '验证',
+        'valid': '验证',
+        'test': '测试',
     }
     metric_labels = {
-        'acc': 'Accuracy',
-        'accuracy': 'Accuracy',
-        'f1': 'F1 Score',
+        'acc': '准确率',
+        'accuracy': '准确率',
+        'f1': 'F1值',
         'eer': 'EER',
-        'min': 'Min',
+        'min': '最小',
         'dcf': 'DCF',
-        'loss': 'Loss',
-        'precision': 'Precision',
-        'recall': 'Recall',
+        'auc': 'AUC',
+        'loss': '损失',
+        'precision': '精确率',
+        'recall': '召回率',
     }
 
     formatted = []
     for token in tokens:
-        lower = token.lower()
-        formatted.append(metric_labels.get(lower, token.title()))
+        formatted.append(metric_labels.get(token, token.upper() if token in {'eer', 'dcf', 'auc'} else token.title()))
 
-    if tokens and tokens[0].lower() in prefix_labels:
-        formatted[0] = prefix_labels[tokens[0].lower()]
+    if tokens and tokens[0] in prefix_labels:
+        formatted[0] = prefix_labels[tokens[0]]
 
-    return ' '.join(formatted)
+    return ''.join(formatted)
 
 
 def _metric_family(metric_name: str) -> str:
@@ -170,7 +206,7 @@ def _place_inline_labels(ax: Any, label_specs: List[Dict[str, Any]], x_position:
 
 def plot_det_curve(scores: List[float], 
                    labels: List[int],
-                   title: str = "DET Curve",
+                   title: str = "DET曲线",
                    save_path: Optional[str] = None) -> None:
     """
     绘制检测误差权衡曲线（DET 曲线）。
@@ -181,6 +217,8 @@ def plot_det_curve(scores: List[float],
         title: 图表标题。
         save_path: 可选的保存路径。
     """
+    setup_matplotlib_for_chinese()
+
     scores = np.array(scores)
     labels = np.array(labels)
     
@@ -190,7 +228,7 @@ def plot_det_curve(scores: List[float],
     
     # 使用对数坐标绘制 DET 曲线。
     plt.figure(figsize=(8, 6))
-    plt.plot(fpr, fnr, linewidth=2, label='DET Curve')
+    plt.plot(fpr, fnr, linewidth=2, label='DET曲线')
     
     # 设置对数坐标轴。
     plt.xscale('log')
@@ -199,8 +237,8 @@ def plot_det_curve(scores: List[float],
     # 设置坐标轴范围和标签。
     plt.xlim([0.001, 1])
     plt.ylim([0.001, 1])
-    plt.xlabel('False Acceptance Rate (FAR)', fontsize=12)
-    plt.ylabel('False Rejection Rate (FRR)', fontsize=12)
+    plt.xlabel('误接受率（FAR）', fontsize=12)
+    plt.ylabel('误拒绝率（FRR）', fontsize=12)
     plt.title(title, fontsize=14)
     
     # 标出 EER 对应的近似交点。
@@ -209,7 +247,7 @@ def plot_det_curve(scores: List[float],
     plt.scatter([eer], [eer], color='red', s=100, zorder=5, label=f'EER = {eer:.4f}')
     
     # 添加参考对角线。
-    plt.plot([0.001, 1], [0.001, 1], 'k--', alpha=0.3, label='EER Line')
+    plt.plot([0.001, 1], [0.001, 1], 'k--', alpha=0.3, label='EER参考线')
     
     plt.legend(loc='upper right')
     plt.grid(True, alpha=0.3)
@@ -223,7 +261,7 @@ def plot_det_curve(scores: List[float],
 
 def plot_score_distribution(target_scores: List[float],
                             non_target_scores: List[float],
-                            title: str = "Score Distribution",
+                            title: str = "分数分布",
                             save_path: Optional[str] = None) -> None:
     """
     绘制目标分数与非目标分数的重叠直方图。
@@ -234,6 +272,8 @@ def plot_score_distribution(target_scores: List[float],
         title: 图表标题。
         save_path: 可选的保存路径。
     """
+    setup_matplotlib_for_chinese()
+
     target_scores = np.array(target_scores)
     non_target_scores = np.array(non_target_scores)
     
@@ -241,11 +281,11 @@ def plot_score_distribution(target_scores: List[float],
     
     # 绘制分数分布直方图。
     bins = np.linspace(-1, 1, 50)
-    plt.hist(target_scores, bins=bins, alpha=0.7, label='Target', color='green')
-    plt.hist(non_target_scores, bins=bins, alpha=0.7, label='Non-target', color='red')
+    plt.hist(target_scores, bins=bins, alpha=0.7, label='同说话人', color='green')
+    plt.hist(non_target_scores, bins=bins, alpha=0.7, label='不同说话人', color='red')
     
-    plt.xlabel('Similarity Score', fontsize=12)
-    plt.ylabel('Count', fontsize=12)
+    plt.xlabel('相似度分数', fontsize=12)
+    plt.ylabel('数量', fontsize=12)
     plt.title(title, fontsize=14)
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -259,7 +299,7 @@ def plot_score_distribution(target_scores: List[float],
 
 def plot_embedding_tsne(embeddings: np.ndarray,
                         labels: List[int],
-                        title: str = "Embedding t-SNE",
+                        title: str = "嵌入向量 t-SNE 可视化",
                         save_path: Optional[str] = None) -> None:
     """
     使用 t-SNE 将嵌入向量可视化到二维平面。
@@ -271,6 +311,7 @@ def plot_embedding_tsne(embeddings: np.ndarray,
         save_path: 可选的保存路径。
     """
     from sklearn.manifold import TSNE
+    setup_matplotlib_for_chinese()
     
     # 使用 t-SNE 进行二维降维。
     tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(embeddings) - 1))
@@ -285,10 +326,10 @@ def plot_embedding_tsne(embeddings: np.ndarray,
     for label, color in zip(unique_labels, colors):
         mask = np.array(labels) == label
         plt.scatter(embeddings_2d[mask, 0], embeddings_2d[mask, 1],
-                   c=[color], label=f'Speaker {label}', alpha=0.7)
+                   c=[color], label=f'说话人 {label}', alpha=0.7)
     
-    plt.xlabel('t-SNE Dimension 1', fontsize=12)
-    plt.ylabel('t-SNE Dimension 2', fontsize=12)
+    plt.xlabel('t-SNE 维度 1', fontsize=12)
+    plt.ylabel('t-SNE 维度 2', fontsize=12)
     plt.title(title, fontsize=14)
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
@@ -311,6 +352,8 @@ def plot_epoch_metrics(metrics: Dict[str, float],
         epoch: 当前轮次，从 1 开始计数。
         save_path: 可选的保存路径。
     """
+    setup_matplotlib_for_chinese()
+
     loss_metrics = {k: v for k, v in metrics.items() if 'loss' in k.lower()}
     non_loss_metrics = {k: v for k, v in metrics.items() if 'loss' not in k.lower()}
 
@@ -334,7 +377,7 @@ def plot_epoch_metrics(metrics: Dict[str, float],
         axes = [axes]
 
     fig.patch.set_facecolor('white')
-    fig.suptitle(f'Epoch {epoch} Training Snapshot', fontsize=16, fontweight='bold', y=0.98)
+    fig.suptitle(f'第 {epoch} 轮训练指标概览', fontsize=16, fontweight='bold', y=0.98)
 
     for ax, (panel_name, panel_metrics) in zip(axes, panels):
         labels = [_format_metric_name(name) for name in panel_metrics.keys()]
@@ -347,8 +390,8 @@ def plot_epoch_metrics(metrics: Dict[str, float],
             ax.scatter(values, y_pos, s=110, color=colors, edgecolors='white', linewidths=1.4, zorder=3)
             max_value = max(values) if values else 1.0
             ax.set_xlim(0, max_value * 1.22 if max_value > 0 else 1.0)
-            ax.set_xlabel('Loss Value', fontsize=11)
-            ax.set_title('Loss Metrics', fontsize=13, fontweight='bold')
+            ax.set_xlabel('损失值', fontsize=11)
+            ax.set_title('损失指标', fontsize=13, fontweight='bold')
             for x_value, y_value in zip(values, y_pos):
                 ax.text(x_value + max(ax.get_xlim()[1] * 0.02, 0.01), y_value, f'{x_value:.4f}',
                         va='center', ha='left', fontsize=10, color='#2F3B4A')
@@ -363,14 +406,14 @@ def plot_epoch_metrics(metrics: Dict[str, float],
             bars = ax.barh(y_pos, sorted_values, color=colors, edgecolor='none', alpha=0.9, height=0.62)
             if all(0.0 <= value <= 1.0 for value in sorted_values):
                 ax.set_xlim(0, 1.0)
-                ax.set_xlabel('Metric Value', fontsize=11)
+                ax.set_xlabel('指标值', fontsize=11)
                 ax.set_xticks(np.linspace(0, 1.0, 6))
             else:
                 max_value = max(sorted_values) if sorted_values else 1.0
                 ax.set_xlim(0, max_value * 1.12 if max_value > 0 else 1.0)
-                ax.set_xlabel('Metric Value', fontsize=11)
+                ax.set_xlabel('指标值', fontsize=11)
 
-            ax.set_title('Performance Metrics', fontsize=13, fontweight='bold')
+            ax.set_title('性能指标', fontsize=13, fontweight='bold')
             ax.invert_yaxis()
             _annotate_bar_values(ax, bars)
 
@@ -397,6 +440,8 @@ def plot_training_trends(history: Dict[str, List[float]],
         history: 按指标名称组织的历史序列。
         save_path: 可选的保存路径。
     """
+    setup_matplotlib_for_chinese()
+
     if not history or not any(history.values()):
         print("警告: 没有训练历史数据可供绘制")
         return
@@ -412,11 +457,11 @@ def plot_training_trends(history: Dict[str, List[float]],
 
     panel_specs = []
     if grouped_metrics['loss']:
-        panel_specs.append(('Loss Dynamics', 'Loss Value', grouped_metrics['loss']))
+        panel_specs.append(('损失变化', '损失值', grouped_metrics['loss']))
     if grouped_metrics['score']:
-        panel_specs.append(('Performance Dynamics', 'Metric Value', grouped_metrics['score']))
+        panel_specs.append(('性能变化', '指标值', grouped_metrics['score']))
     if grouped_metrics['error']:
-        panel_specs.append(('Error-Rate Dynamics', 'Error Value', grouped_metrics['error']))
+        panel_specs.append(('错误率变化', '错误率', grouped_metrics['error']))
 
     if not panel_specs:
         return
@@ -431,7 +476,7 @@ def plot_training_trends(history: Dict[str, List[float]],
         axes = [axes]
 
     fig.patch.set_facecolor('white')
-    fig.suptitle('Training Dynamics', fontsize=17, fontweight='bold', y=0.985)
+    fig.suptitle('训练趋势', fontsize=17, fontweight='bold', y=0.985)
 
     max_epoch = epochs[-1]
     extra_space = max(1, int(np.ceil(max_epoch * 0.12)))
@@ -503,7 +548,7 @@ def plot_training_trends(history: Dict[str, List[float]],
         _style_axis(ax)
         _place_inline_labels(ax, label_specs, label_x)
 
-    axes[-1].set_xlabel('Epoch', fontsize=11)
+    axes[-1].set_xlabel('轮次', fontsize=11)
     plt.tight_layout(rect=[0, 0, 0.94, 0.965])
     
     if save_path:
@@ -525,6 +570,8 @@ def plot_pretrain_comparison(pretrain_metrics: Dict[str, float],
         finetuned_metrics: 微调后模型的指标字典。
         save_path: 可选的保存路径。
     """
+    setup_matplotlib_for_chinese()
+
     # 找出两者共有的指标
     common_metrics = sorted(set(pretrain_metrics.keys()) & set(finetuned_metrics.keys()))
     
@@ -540,14 +587,14 @@ def plot_pretrain_comparison(pretrain_metrics: Dict[str, float],
     pretrain_vals = [pretrain_metrics[m] for m in common_metrics]
     finetuned_vals = [finetuned_metrics[m] for m in common_metrics]
     
-    bars1 = ax.bar(x - width/2, pretrain_vals, width, label='Pretrained', color='#74b9ff', alpha=0.8)
-    bars2 = ax.bar(x + width/2, finetuned_vals, width, label='Finetuned', color='#00b894', alpha=0.8)
+    bars1 = ax.bar(x - width/2, pretrain_vals, width, label='预训练模型', color='#74b9ff', alpha=0.8)
+    bars2 = ax.bar(x + width/2, finetuned_vals, width, label='微调后模型', color='#00b894', alpha=0.8)
     
-    ax.set_xlabel('Metrics', fontsize=12)
-    ax.set_ylabel('Value', fontsize=12)
-    ax.set_title('Pretrained vs Finetuned Model Performance Comparison', fontsize=14, fontweight='bold')
+    ax.set_xlabel('指标', fontsize=12)
+    ax.set_ylabel('数值', fontsize=12)
+    ax.set_title('预训练与微调模型性能对比', fontsize=14, fontweight='bold')
     ax.set_xticks(x)
-    ax.set_xticklabels([m.replace('_', '\n') for m in common_metrics], fontsize=10)
+    ax.set_xticklabels([_format_metric_name(m) for m in common_metrics], fontsize=10)
     ax.legend(loc='upper right', fontsize=11)
     ax.grid(True, alpha=0.3, axis='y')
     
@@ -567,16 +614,16 @@ def plot_pretrain_comparison(pretrain_metrics: Dict[str, float],
             if pretrain_vals[i] != 0:
                 improvement = (pretrain_vals[i] - finetuned_vals[i]) / pretrain_vals[i] * 100
                 if improvement > 0:
-                    improvements.append(f"{m}: ↓{improvement:.1f}%")
+                    improvements.append(f"{_format_metric_name(m)}：下降 {improvement:.1f}%")
         else:
             # 越大越好
             if pretrain_vals[i] != 0:
                 improvement = (finetuned_vals[i] - pretrain_vals[i]) / pretrain_vals[i] * 100
                 if improvement > 0:
-                    improvements.append(f"{m}: ↑{improvement:.1f}%")
+                    improvements.append(f"{_format_metric_name(m)}：提升 {improvement:.1f}%")
     
     if improvements:
-        improvement_text = "Performance Improvement:\n" + "\n".join(improvements)
+        improvement_text = "性能提升：\n" + "\n".join(improvements)
         ax.text(0.02, 0.98, improvement_text, transform=ax.transAxes,
                fontsize=10, verticalalignment='top',
                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))

@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from speechbrain.inference.speaker import SpeakerRecognition
